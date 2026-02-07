@@ -1,3 +1,0 @@
-﻿M:\soft app\vs\MSBuild\Microsoft\VC\v170\Microsoft.CppBuild.targets(538,5): warning MSB8028: 中间目录(Debug\x64\)包含从另一个项目(05-SkyBox.vcxproj)共享的文件。   这会导致错误的清除和重新生成行为。
-  5-SkyBox.cpp
-  5-Branch-SH_Test.vcxproj -> N:\code\Upload\Project\5-Branch-SH_Test\Debug\x64\05-Branch-SH_Test.exe
