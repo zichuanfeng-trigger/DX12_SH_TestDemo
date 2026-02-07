@@ -3,4 +3,4 @@
 
 注意 请使用git拉取仓库，我使用了LFS。如果下载zip启动项目会闪退，检查Assets里的图片金星.jpg，点开github仓库搜索并下载图片，覆盖后可解决
 
-https://media.githubusercontent.com/media/zichuanfeng-trigger/DX12_SH_TestDemo/master/Other/show.gif
+![Demo Show](https://media.githubusercontent.com/media/zichuanfeng-trigger/DX12_SH_TestDemo/master/Other/show.gif)
