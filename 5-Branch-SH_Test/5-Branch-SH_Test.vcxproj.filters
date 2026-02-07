@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\WindowsCommons\DDSTextureLoader12.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="5-SkyBox.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\WindowsCommons\dds.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WindowsCommons\DDSTextureLoader12.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SH_Probes.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{ab21ffde-8a8f-41de-a71b-90671ff89402}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{33976d5c-335a-474b-b3ff-d0c451fb34a3}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
