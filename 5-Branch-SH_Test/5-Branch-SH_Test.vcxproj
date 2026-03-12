@@ -160,13 +160,39 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\WindowsCommons\DDSTextureLoader12.cpp" />
-    <ClCompile Include="5-SkyBox.cpp" />
+    <ClCompile Include="DeferredRenderer.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\WindowsCommons\dds.h" />
-    <ClInclude Include="..\WindowsCommons\DDSTextureLoader12.h" />
-    <ClInclude Include="SH_Probes.h" />
+    <FxCompile Include="Shader\Deferred\GeometryPass.hlsl">
+      <ShaderType>Vertex</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>VSMain</EntryPointName>
+    </FxCompile>
+    <FxCompile Include="Shader\Deferred\GeometryPass.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>PSMain</EntryPointName>
+    </FxCompile>
+    <FxCompile Include="Shader\Deferred\LightingPass.hlsl">
+      <ShaderType>Vertex</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>VSMain</EntryPointName>
+    </FxCompile>
+    <FxCompile Include="Shader\Deferred\LightingPass.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>PSMain</EntryPointName>
+    </FxCompile>
+    <FxCompile Include="Shader\Deferred\Skybox.hlsl">
+      <ShaderType>Vertex</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>VSMain</EntryPointName>
+    </FxCompile>
+    <FxCompile Include="Shader\Deferred\Skybox.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>5.0</ShaderModel>
+      <EntryPointName>PSMain</EntryPointName>
+    </FxCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -1,12 +1,12 @@
 #include <SDKDDKVer.h>
-#define WIN32_LEAN_AND_MEAN // ´Ó Windows Í·ÖÐÅÅ³ý¼«ÉÙÊ¹ÓÃµÄ×ÊÁÏ
+#define WIN32_LEAN_AND_MEAN // ï¿½ï¿½ Windows Í·ï¿½ï¿½ï¿½Å³ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½Ãµï¿½ï¿½ï¿½ï¿½ï¿½
 #include <windows.h>
 #include <tchar.h>
 #include <fstream>  //for ifstream
 #include <strsafe.h>
 #include <atlconv.h> //for T2A
 #include <atlcoll.h>
-#include <wrl.h> //Ìí¼ÓWTLÖ§³Ö ·½±ãÊ¹ÓÃCOM
+#include <wrl.h> //ï¿½ï¿½ï¿½ï¿½WTLÖ§ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½COM
 #include <dxgi1_6.h>
 #include <DirectXMath.h>
 #include <d3d12.h>//for d3d12
@@ -18,7 +18,31 @@
 
 #include "..\WindowsCommons\DDSTextureLoader12.h"
 
-#include "SH_Probes.h"
+// Deferred Renderer Constants
+static constexpr UINT GBUFFER_COUNT = 3;
+static constexpr DXGI_FORMAT GBUFFER_FORMATS[GBUFFER_COUNT] = {
+    DXGI_FORMAT_R8G8B8A8_UNORM,       // RT0: Albedo
+    DXGI_FORMAT_R16G16B16A16_FLOAT,   // RT1: Normal (View Space)
+    DXGI_FORMAT_R32G32B32A32_FLOAT    // RT2: Position (View Space)
+};
+
+// Light structure for deferred rendering
+struct PointLight
+{
+    XMFLOAT3 Position;
+    float Radius;
+    XMFLOAT3 Color;
+    float Intensity;
+};
+
+// Lighting constants for deferred rendering
+struct LightingConstants
+{
+    XMFLOAT4 CameraPos;
+    PointLight Lights[4];
+    UINT LightCount;
+    float Pad[3];
+};
 
 using namespace std;
 using namespace Microsoft;
@@ -38,13 +62,13 @@ using namespace DirectX;
 
 #define GRS_THROW_IF_FAILED(hr) {HRESULT _hr = (hr);if (FAILED(_hr)){ throw CGRSCOMException(_hr); }}
 
-//ÓÃÓÚÉÏÈ¡Õû³ý·¨
+//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 #define GRS_UPPER_DIV(A,B) ((UINT)(((A)+((B)-1))/(B)))
 
-//¸ü¼ò½àµÄÏòÉÏ±ß½ç¶ÔÆëËã·¨ ÄÚ´æ¹ÜÀíÖÐ³£ÓÃ Çë¼Ç×¡
+//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï±ß½ï¿½ï¿½ï¿½ï¿½ï¿½ã·¨ ï¿½Ú´ï¿½ï¿½ï¿½ï¿½ï¿½Ð³ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½×¡
 #define GRS_UPPER(A,B) ((UINT)(((A)+((B)-1))&~(B - 1)))
 
-// ÄÚ´æ·ÖÅäµÄºê¶¨Òå
+// ï¿½Ú´ï¿½ï¿½ï¿½ï¿½Äºê¶¨ï¿½ï¿½
 #define GRS_ALLOC(sz)		::HeapAlloc(GetProcessHeap(),0,(sz))
 #define GRS_CALLOC(sz)		::HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,(sz))
 #define GRS_CREALLOC(p,sz)	::HeapReAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,(p),(sz))
@@ -71,7 +95,7 @@ struct WICTranslate
 };
 
 static WICTranslate g_WICFormats[] =
-{//WIC¸ñÊ½ÓëDXGIÏñËØ¸ñÊ½µÄ¶ÔÓ¦±í£¬¸Ã±íÖÐµÄ¸ñÊ½Îª±»Ö§³ÖµÄ¸ñÊ½
+{//WICï¿½ï¿½Ê½ï¿½ï¿½DXGIï¿½ï¿½ï¿½Ø¸ï¿½Ê½ï¿½Ä¶ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½Ã±ï¿½ï¿½ÐµÄ¸ï¿½Ê½Îªï¿½ï¿½Ö§ï¿½ÖµÄ¸ï¿½Ê½
 	{ GUID_WICPixelFormat128bppRGBAFloat,       DXGI_FORMAT_R32G32B32A32_FLOAT },
 
 	{ GUID_WICPixelFormat64bppRGBAHalf,         DXGI_FORMAT_R16G16B16A16_FLOAT },
@@ -95,7 +119,7 @@ static WICTranslate g_WICFormats[] =
 	{ GUID_WICPixelFormat8bppAlpha,             DXGI_FORMAT_A8_UNORM },
 };
 
-// WIC ÏñËØ¸ñÊ½×ª»»±í.
+// WIC ï¿½ï¿½ï¿½Ø¸ï¿½Ê½×ªï¿½ï¿½ï¿½ï¿½.
 struct WICConvert
 {
 	GUID source;
@@ -104,7 +128,7 @@ struct WICConvert
 
 static WICConvert g_WICConvert[] =
 {
-	// Ä¿±ê¸ñÊ½Ò»¶¨ÊÇ×î½Ó½üµÄ±»Ö§³ÖµÄ¸ñÊ½
+	// Ä¿ï¿½ï¿½ï¿½Ê½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó½ï¿½ï¿½Ä±ï¿½Ö§ï¿½ÖµÄ¸ï¿½Ê½
 	{ GUID_WICPixelFormatBlackWhite,            GUID_WICPixelFormat8bppGray }, // DXGI_FORMAT_R8_UNORM
 
 	{ GUID_WICPixelFormat1bppIndexed,           GUID_WICPixelFormat32bppRGBA }, // DXGI_FORMAT_R8G8B8A8_UNORM
@@ -158,7 +182,7 @@ static WICConvert g_WICConvert[] =
 };
 
 bool GetTargetPixelFormat(const GUID* pSourceFormat, GUID* pTargetFormat)
-{//²é±íÈ·¶¨¼æÈÝµÄ×î½Ó½ü¸ñÊ½ÊÇÄÄ¸ö
+{//ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½ï¿½ï¿½Ó½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½Ä¸ï¿½
 	*pTargetFormat = *pSourceFormat;
 	for (size_t i = 0; i < _countof(g_WICConvert); ++i)
 	{
@@ -172,7 +196,7 @@ bool GetTargetPixelFormat(const GUID* pSourceFormat, GUID* pTargetFormat)
 }
 
 DXGI_FORMAT GetDXGIFormatFromPixelFormat(const GUID* pPixelFormat)
-{//²é±íÈ·¶¨×îÖÕ¶ÔÓ¦µÄDXGI¸ñÊ½ÊÇÄÄÒ»¸ö
+{//ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½Õ¶ï¿½Ó¦ï¿½ï¿½DXGIï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½
 	for (size_t i = 0; i < _countof(g_WICFormats); ++i)
 	{
 		if (InlineIsEqualGUID(g_WICFormats[i].wic, *pPixelFormat))
@@ -196,27 +220,27 @@ struct ST_GRS_VERTEX
 
 struct ST_GRS_SKYBOX_VERTEX
 {
-public: // ÏÔÊ½ÉùÃ÷¹«¿ª·ÃÎÊÈ¨ÏÞ£¨ÆäÊµ struct Ä¬ÈÏ¾ÍÊÇ public£¬Ð´³öÀ´ÊÇÎªÁËÇåÎú£©
+public: // ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¨ï¿½Þ£ï¿½ï¿½ï¿½Êµ struct Ä¬ï¿½Ï¾ï¿½ï¿½ï¿½ publicï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-	// Æë´Î×ø±ê£¬ËùÒÔÓÃµÄ4Î¬
+	// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê£¬ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½4Î¬
 	XMFLOAT4 m_v4Position;
 
 	ST_GRS_SKYBOX_VERTEX()
-		: m_v4Position() // µ÷ÓÃ XMFLOAT4 µÄÄ¬ÈÏ¹¹Ôì£¬ÇåÁã
+		: m_v4Position() // ï¿½ï¿½ï¿½ï¿½ XMFLOAT4 ï¿½ï¿½Ä¬ï¿½Ï¹ï¿½ï¿½ì£¬ï¿½ï¿½ï¿½ï¿½
 	{
 	} 
 
 	ST_GRS_SKYBOX_VERTEX(float x, float y, float z)
-		: m_v4Position(x, y, z, 1.0f) // °Ñ w ·ÖÁ¿ÉèÎª 1.0f
+		: m_v4Position(x, y, z, 1.0f) // ï¿½ï¿½ w ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª 1.0f
 	{
 	}
-	// ÔÚ 3D Í¼ÐÎÑ§ÖÐ£¬'µã'µÄ w ·ÖÁ¿±ØÐëÊÇ 1.0£¬'ÏòÁ¿'µÄ w ·ÖÁ¿Í¨³£ÊÇ 0.0¡£
-	// Ìì¿ÕºÐµÄ¶¥µãÊÇÎ»ÖÃµã£¬ËùÒÔÕâÀïÎª 1.0f¡£
+	// ï¿½ï¿½ 3D Í¼ï¿½ï¿½Ñ§ï¿½Ð£ï¿½'ï¿½ï¿½'ï¿½ï¿½ w ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 1.0ï¿½ï¿½'ï¿½ï¿½ï¿½ï¿½'ï¿½ï¿½ w ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ 0.0ï¿½ï¿½
+	// ï¿½ï¿½ÕºÐµÄ¶ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ãµã£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª 1.0fï¿½ï¿½
 
-	// ÖØÔØ¸³ÖµÔËËã·û
+	// ï¿½ï¿½ï¿½Ø¸ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½
 	ST_GRS_SKYBOX_VERTEX& operator = (const ST_GRS_SKYBOX_VERTEX& vt)
 	{
-		// °Ñ´«Èë¶ÔÏó (vt) µÄÎ»ÖÃÊý¾Ý£¬¿½±´¸ø×Ô¼º (m_v4Position)
+		// ï¿½Ñ´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (vt) ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½ (m_v4Position)
 		m_v4Position = vt.m_v4Position;
 		return *this; 
 	}
@@ -227,40 +251,37 @@ struct ST_GRS_FRAME_MVP_BUFFER
 	XMFLOAT4X4 m_MVP;
 	XMFLOAT4X4 m_mWorld;
 	XMFLOAT4   m_v4EyePos;
-
-	// SH ÏµÊýÎÒÃÇÒ²·Åµ½ MVP BUFFER£¬ÒòÎªSH Ò²ÐèÒª¸ú×ÅÎ»ÖÃ±ä»¯±ä»¯
-	XMFLOAT4   m_SHCoeffs[9];
 };
 
-UINT g_nCurrentSamplerNO = 1; //µ±Ç°Ê¹ÓÃµÄ²ÉÑùÆ÷Ë÷Òý £¬ÕâÀïÄ¬ÈÏÊ¹ÓÃµÚÒ»¸ö
-UINT g_nSampleMaxCnt = 5;		//´´½¨Îå¸öµäÐÍµÄ²ÉÑùÆ÷
+UINT g_nCurrentSamplerNO = 1;
+UINT g_nSampleMaxCnt = 5;
 
-//³õÊ¼µÄÄ¬ÈÏÉãÏñ»úµÄÎ»ÖÃ¡£ÒÔ¼°ÉãÏñ»úÏà¹Ø±äÁ¿
-XMFLOAT3 g_f3EyePos = XMFLOAT3(0.0f, 5.0f, -10.0f); //ÑÛ¾¦Î»ÖÃ
-XMFLOAT3 g_f3LockAt = XMFLOAT3(0.0f, 0.0f, 1.0f);    //ÑÛ¾¦Ëù¶¢µÄÎ»ÖÃ
-XMFLOAT3 g_f3HeapUp = XMFLOAT3(0.0f, 1.0f, 0.0f);    //Í·²¿ÕýÉÏ·½Î»ÖÃ
+XMFLOAT3 g_f3EyePos = XMFLOAT3(0.0f, 2.0f, -8.0f);
+XMFLOAT3 g_f3LockAt = XMFLOAT3(0.0f, 0.0f, 1.0f);
+XMFLOAT3 g_f3HeapUp = XMFLOAT3(0.0f, 1.0f, 0.0f);
 
-float g_fYaw = 0.0f;			// ÈÆÕýZÖáµÄÐý×ªÁ¿.
-float g_fPitch = 0.0f;			// ÈÆXZÆ½ÃæµÄÐý×ªÁ¿
+float g_fYaw = 0.0f;
+float g_fPitch = 0.0f;
 
-double g_fPalstance = 10.0f * XM_PI / 180.0f;	//ÎïÌåÐý×ªµÄ½ÇËÙ¶È£¬µ¥Î»£º»¡¶È/Ãë
+double g_fPalstance = 10.0f * XM_PI / 180.0f;
 
-// ÇòÌåµÄÊÀ½ç×ø±ê (³õÊ¼ÔÚÔ­µã)
 XMFLOAT3 g_SpherePos = XMFLOAT3(0.0f, 0.0f, 0.0f);
 
-// ¡¾ÐÂÔö¡¿Êó±ê¿ØÖÆÏà¹Ø±äÁ¿
-POINT g_LastMousePos = { 0, 0 };    // ÉÏÒ»Ö¡µÄÊó±êÎ»ÖÃ
-bool  g_bRightMouseDown = false;    // ÓÒ¼üÊÇ·ñ°´ÏÂ
+POINT g_LastMousePos = { 0, 0 };
+bool  g_bRightMouseDown = false;
+
+// Deferred Rendering - Scene Lights
+PointLight g_SceneLights[3] = {
+    { XMFLOAT3(-3.0f, 3.0f, 3.0f), 10.0f, XMFLOAT3(1.0f, 0.3f, 0.3f), 2.0f },
+    { XMFLOAT3(3.0f, 3.0f, 3.0f), 10.0f, XMFLOAT3(0.3f, 0.3f, 1.0f), 2.0f },
+    { XMFLOAT3(0.0f, 5.0f, -3.0f), 15.0f, XMFLOAT3(1.0f, 1.0f, 0.8f), 1.5f }
+};
 
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 
 int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    lpCmdLine, int nCmdShow)
 {
 	::CoInitialize(nullptr);  //for WIC & COM
-
-	// ³õÊ¼»¯³¡¾°Êý¾ÝºÍºæ±ºÌ½Õë
-	InitSceneData(); // 1. ·ÖÅä g_Probes ¿Õ¼ä£¬ÉèÖÃµÆ¹âÎ»ÖÃ
-	BakeProbes();    // 2. Ô¤¼ÆËãÃ¿¸öÌ½ÕëµÄ SH Êý¾Ý
 
 	const UINT							nFrameBackBufCount = 3u;
 	int									iWndWidth = 1024;
@@ -276,7 +297,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 	ST_GRS_FRAME_MVP_BUFFER*			pMVPBufEarth = nullptr;
 
 	ST_GRS_FRAME_MVP_BUFFER*			pMVPBufSkybox = nullptr;
-	//³£Á¿»º³åÇø´óÐ¡ÉÏ¶ÔÆëµ½256Bytes±ß½ç
+	//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½Ï¶ï¿½ï¿½ëµ½256Bytesï¿½ß½ï¿½
 	SIZE_T								szMVPBuf = GRS_UPPER(sizeof(ST_GRS_FRAME_MVP_BUFFER), 256);
 
 	float								fSphereSize = 1.0f;
@@ -313,23 +334,23 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 	UINT								nRTVDescriptorSize = 0;
 	UINT								nSRVDescriptorSize = 0;
-	UINT								nSamplerDescriptorSize = 0; //²ÉÑùÆ÷´óÐ¡
+	UINT								nSamplerDescriptorSize = 0; //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡
 	
 
 	D3D12_VIEWPORT						stViewPort = { 0.0f, 0.0f, static_cast<float>(iWndWidth), static_cast<float>(iWndHeight), D3D12_MIN_DEPTH, D3D12_MAX_DEPTH };
 	D3D12_RECT							stScissorRect = { 0, 0, static_cast<LONG>(iWndWidth), static_cast<LONG>(iWndHeight) };
 
-	//ÇòÌåµÄÍø¸ñÊý¾Ý
+	//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 	ST_GRS_VERTEX*						pstSphereVertices = nullptr;
 	UINT								nSphereVertexCnt = 0;
 	UINT*								pSphereIndices = nullptr;
 	UINT								nSphereIndexCnt = 0;
 
-	//Sky BoxµÄÍø¸ñÊý¾Ý
+	//Sky Boxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 	UINT								nSkyboxIndexCnt = 0;
 
 	
-	//¼ÓÔØSkyboxµÄCube MapÐèÒªµÄ±äÁ¿
+	//ï¿½ï¿½ï¿½ï¿½Skyboxï¿½ï¿½Cube Mapï¿½ï¿½Òªï¿½Ä±ï¿½ï¿½ï¿½
 	std::unique_ptr<uint8_t[]>			ddsData;
 	std::vector<D3D12_SUBRESOURCE_DATA> arSubResources;
 	DDS_ALPHA_MODE						emAlphaMode = DDS_ALPHA_MODE_UNKNOWN;
@@ -353,8 +374,8 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 	ComPtr<IDXGISwapChain3>				pISwapChain3;
 	ComPtr<ID3D12Resource>				pIARenderTargets[nFrameBackBufCount];
 	ComPtr<ID3D12DescriptorHeap>		pIRTVHeap;
-	ComPtr<ID3D12DescriptorHeap>		pIDSVHeap;			//Éî¶È»º³åÃèÊö·û¶Ñ
-	ComPtr<ID3D12Resource>				pIDepthStencilBuffer; //Éî¶ÈÀ¯°å»º³åÇø
+	ComPtr<ID3D12DescriptorHeap>		pIDSVHeap;			//ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+	ComPtr<ID3D12Resource>				pIDepthStencilBuffer; //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å»ºï¿½ï¿½ï¿½ï¿½
 
 	ComPtr<ID3D12Heap>					pIRESHeapEarth;
 	ComPtr<ID3D12Heap>					pIUploadHeapEarth;
@@ -383,6 +404,17 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 	ComPtr<ID3D12PipelineState>			pIPSOEarth;
 	ComPtr<ID3D12PipelineState>			pIPSOSkyBox;
 
+	// Deferred Rendering - G-Buffer Resources
+	ComPtr<ID3D12Resource>				pIGBuffer[GBUFFER_COUNT];
+	ComPtr<ID3D12DescriptorHeap>		pIGBufferRTVHeap;
+	ComPtr<ID3D12DescriptorHeap>		pIGBufferSRVHeap;
+	ComPtr<ID3D12CommandAllocator>		pICmdAllocLighting;
+	ComPtr<ID3D12GraphicsCommandList>	pIBundlesLighting;
+	ComPtr<ID3D12Resource>				pICBUploadLighting;
+	LightingConstants*					pLightingCBData = nullptr;
+	ComPtr<ID3D12RootSignature>			pIRootSignatureLighting;
+	ComPtr<ID3D12PipelineState>			pIPSOLighting;
+
 	ComPtr<IWICImagingFactory>			pIWICFactory;
 	ComPtr<IWICBitmapDecoder>			pIWICDecoder;
 	ComPtr<IWICBitmapFrameDecode>		pIWICFrame;
@@ -392,7 +424,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 	try
 	{
-			// µÃµ½µ±Ç°µÄ¹¤×÷Ä¿Â¼£¬·½±ãÎÒÃÇÊ¹ÓÃÏà¶ÔÂ·¾¶À´·ÃÎÊ¸÷ÖÖ×ÊÔ´ÎÄ¼þ
+			// ï¿½Ãµï¿½ï¿½ï¿½Ç°ï¿½Ä¹ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¸ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ä¼ï¿½
 			{
 				if (0 == ::GetModuleFileName(nullptr, pszAppPath, MAX_PATH))
 				{
@@ -401,24 +433,24 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 				WCHAR* lastSlash = _tcsrchr(pszAppPath, _T('\\'));
 				if (lastSlash)
-				{//É¾³ýExeÎÄ¼þÃû
+				{//É¾ï¿½ï¿½Exeï¿½Ä¼ï¿½ï¿½ï¿½
 					*(lastSlash) = _T('\0');
 				}
 
 				lastSlash = _tcsrchr(pszAppPath, _T('\\'));
 				if (lastSlash)
-				{//É¾³ýx64Â·¾¶
+				{//É¾ï¿½ï¿½x64Â·ï¿½ï¿½
 					*(lastSlash) = _T('\0');
 				}
 
 				lastSlash = _tcsrchr(pszAppPath, _T('\\'));
 				if (lastSlash)
-				{//É¾³ýDebugÂ·¾¶
+				{//É¾ï¿½ï¿½DebugÂ·ï¿½ï¿½
 					*(lastSlash + 1) = _T('\0');
 				}
 			}
 
-		// ´´½¨´°¿Ú
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			WNDCLASSEX wcex = {};
 			wcex.cbSize = sizeof(WNDCLASSEX);
@@ -428,7 +460,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			wcex.cbWndExtra = 0;
 			wcex.hInstance = hInstance;
 			wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
-			wcex.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);		//·ÀÖ¹ÎÞÁÄµÄ±³¾°ÖØ»æ
+			wcex.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);		//ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ÄµÄ±ï¿½ï¿½ï¿½ï¿½Ø»ï¿½
 			wcex.lpszClassName = GRS_WND_CLASS_NAME;
 			RegisterClassEx(&wcex);
 
@@ -436,7 +468,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			RECT rtWnd = { 0, 0, iWndWidth, iWndHeight };
 			AdjustWindowRect(&rtWnd, dwWndStyle, FALSE);
 
-			// ¼ÆËã´°¿Ú¾ÓÖÐµÄÆÁÄ»×ø±ê
+			// ï¿½ï¿½ï¿½ã´°ï¿½Ú¾ï¿½ï¿½Ðµï¿½ï¿½ï¿½Ä»ï¿½ï¿½ï¿½ï¿½
 			INT posX = (GetSystemMetrics(SM_CXSCREEN) - rtWnd.right - rtWnd.left) / 2;
 			INT posY = (GetSystemMetrics(SM_CYSCREEN) - rtWnd.bottom - rtWnd.top) / 2;
 
@@ -458,7 +490,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			}
 		}
 
-		// Ê¹ÓÃWIC¼ÓÔØÍ¼Æ¬£¬²¢×ª»»ÎªDXGI¼æÈÝµÄ¸ñÊ½
+		// Ê¹ï¿½ï¿½WICï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ÎªDXGIï¿½ï¿½ï¿½ÝµÄ¸ï¿½Ê½
 		{
 			ComPtr<IWICFormatConverter> pIConverter;
 			ComPtr<IWICComponentInfo> pIWICmntinfo;
@@ -468,66 +500,66 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			ComPtr<IWICPixelFormatInfo> pIWICPixelinfo;
 
 			
-			//Ê¹ÓÃ´¿COM·½Ê½´´½¨WICÀà³§¶ÔÏó£¬Ò²ÊÇµ÷ÓÃWICµÚÒ»²½Òª×öµÄÊÂÇé
+			//Ê¹ï¿½Ã´ï¿½COMï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½WICï¿½à³§ï¿½ï¿½ï¿½ï¿½Ò²ï¿½Çµï¿½ï¿½ï¿½WICï¿½ï¿½Ò»ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pIWICFactory)));
 
-			//Ê¹ÓÃWICÀà³§¶ÔÏó½Ó¿Ú¼ÓÔØÎÆÀíÍ¼Æ¬£¬²¢µÃµ½Ò»¸öWIC½âÂëÆ÷¶ÔÏó½Ó¿Ú£¬Í¼Æ¬ÐÅÏ¢¾ÍÔÚÕâ¸ö½Ó¿Ú´ú±íµÄ¶ÔÏóÖÐÁË
+			//Ê¹ï¿½ï¿½WICï¿½à³§ï¿½ï¿½ï¿½ï¿½Ó¿Ú¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½Ò»ï¿½ï¿½WICï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¿Ú£ï¿½Í¼Æ¬ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¿Ú´ï¿½ï¿½ï¿½ï¿½Ä¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			WCHAR pszTexcuteFileName[MAX_PATH] = {};
-			StringCchPrintfW(pszTexcuteFileName, MAX_PATH, _T("%sAssets\\½ðÐÇ.jpg"), pszAppPath);
+			StringCchPrintfW(pszTexcuteFileName, MAX_PATH, _T("%sAssets\\ï¿½ï¿½ï¿½ï¿½.jpg"), pszAppPath);
 
 			GRS_THROW_IF_FAILED(pIWICFactory->CreateDecoderFromFilename(
-				pszTexcuteFileName,              // ÎÄ¼þÃû
-				nullptr,                            // ²»Ö¸¶¨½âÂëÆ÷£¬Ê¹ÓÃÄ¬ÈÏ
-				GENERIC_READ,                    // ·ÃÎÊÈ¨ÏÞ
-				WICDecodeMetadataCacheOnDemand,  // ÈôÐèÒª¾Í»º³åÊý¾Ý 
-				&pIWICDecoder                    // ½âÂëÆ÷¶ÔÏó
+				pszTexcuteFileName,              // ï¿½Ä¼ï¿½ï¿½ï¿½
+				nullptr,                            // ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½Ä¬ï¿½ï¿½
+				GENERIC_READ,                    // ï¿½ï¿½ï¿½ï¿½È¨ï¿½ï¿½
+				WICDecodeMetadataCacheOnDemand,  // ï¿½ï¿½ï¿½ï¿½Òªï¿½Í»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 
+				&pIWICDecoder                    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			));
-			// »ñÈ¡µÚÒ»Ö¡Í¼Æ¬(ÒòÎªGIFµÈ¸ñÊ½ÎÄ¼þ¿ÉÄÜ»áÓÐ¶àÖ¡Í¼Æ¬£¬ÆäËûµÄ¸ñÊ½Ò»°ãÖ»ÓÐÒ»Ö¡Í¼Æ¬)
-			// Êµ¼Ê½âÎö³öÀ´µÄÍùÍùÊÇÎ»Í¼¸ñÊ½Êý¾Ý
+			// ï¿½ï¿½È¡ï¿½ï¿½Ò»Ö¡Í¼Æ¬(ï¿½ï¿½ÎªGIFï¿½È¸ï¿½Ê½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½Ü»ï¿½ï¿½Ð¶ï¿½Ö¡Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¸ï¿½Ê½Ò»ï¿½ï¿½Ö»ï¿½ï¿½Ò»Ö¡Í¼Æ¬)
+			// Êµï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»Í¼ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pIWICDecoder->GetFrame(0, &pIWICFrame));
-			//»ñÈ¡WICÍ¼Æ¬¸ñÊ½
+			//ï¿½ï¿½È¡WICÍ¼Æ¬ï¿½ï¿½Ê½
 			GRS_THROW_IF_FAILED(pIWICFrame->GetPixelFormat(&wpf));
-			//Í¨¹ýµÚÒ»µÀ×ª»»Ö®ºó»ñÈ¡DXGIµÄµÈ¼Û¸ñÊ½
-			if (GetTargetPixelFormat(&wpf, &tgFormat))//Ñ°ÕÒÊÊºÏµÄ¸ñÊ½£¬wpf±¾Éí¾ÍÊÊºÏ¾Í²»¹Ü¡£ÐèÒª×ª»»ÎªÊÊºÏµÄ¾Í¸³Öµµ½tgFormat
+			//Í¨ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½×ªï¿½ï¿½Ö®ï¿½ï¿½ï¿½È¡DXGIï¿½ÄµÈ¼Û¸ï¿½Ê½
+			if (GetTargetPixelFormat(&wpf, &tgFormat))//Ñ°ï¿½ï¿½ï¿½ÊºÏµÄ¸ï¿½Ê½ï¿½ï¿½wpfï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÊºÏ¾Í²ï¿½ï¿½Ü¡ï¿½ï¿½ï¿½Òª×ªï¿½ï¿½Îªï¿½ÊºÏµÄ¾Í¸ï¿½Öµï¿½ï¿½tgFormat
 			{
 				emTxtFmtEarth = GetDXGIFormatFromPixelFormat(&tgFormat);
 			}
 
 			if (DXGI_FORMAT_UNKNOWN == emTxtFmtEarth)
-			{// ²»Ö§³ÖµÄÍ¼Æ¬¸ñÊ½ Ä¿Ç°ÍË³öÁËÊÂ 
-			 // Ò»°ã ÔÚÊµ¼ÊµÄÒýÇæµ±ÖÐ¶¼»áÌá¹©ÎÆÀí¸ñÊ½×ª»»¹¤¾ß£¬
-			 // Í¼Æ¬¶¼ÐèÒªÌáÇ°×ª»»ºÃ£¬ËùÒÔ²»»á³öÏÖ²»Ö§³ÖµÄÏÖÏó
+			{// ï¿½ï¿½Ö§ï¿½Öµï¿½Í¼Æ¬ï¿½ï¿½Ê½ Ä¿Ç°ï¿½Ë³ï¿½ï¿½ï¿½ï¿½ï¿½ 
+			 // Ò»ï¿½ï¿½ ï¿½ï¿½Êµï¿½Êµï¿½ï¿½ï¿½ï¿½æµ±ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½á¹©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½×ªï¿½ï¿½ï¿½ï¿½ï¿½ß£ï¿½
+			 // Í¼Æ¬ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½Ç°×ªï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½ï¿½ï¿½Ö²ï¿½Ö§ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½
 				throw CGRSCOMException(S_FALSE);
 			}
 
 
-			//¸ñÊ½×ª»»
+			//ï¿½ï¿½Ê½×ªï¿½ï¿½
 			if (!InlineIsEqualGUID(wpf, tgFormat))
-			{// Õâ¸öÅÐ¶ÏºÜÖØÒª£¬Èç¹ûÔ­WIC¸ñÊ½²»ÊÇÖ±½ÓÄÜ×ª»»ÎªDXGI¸ñÊ½µÄÍ¼Æ¬Ê±
-			 // ÎÒÃÇÐèÒª×öµÄ¾ÍÊÇ×ª»»Í¼Æ¬¸ñÊ½Î»ÊÊºÏµÄ¸ñÊ½£¬ÎªÄÜ¹»Ö±½Ó¶ÔÓ¦DXGI¸ñÊ½µÄÐÎÊ½×ö×¼±¸
-				//´´½¨Í¼Æ¬¸ñÊ½×ª»»Æ÷
+			{// ï¿½ï¿½ï¿½ï¿½Ð¶Ïºï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½Ô­WICï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ÎªDXGIï¿½ï¿½Ê½ï¿½ï¿½Í¼Æ¬Ê±
+			 // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½Ä¾ï¿½ï¿½ï¿½×ªï¿½ï¿½Í¼Æ¬ï¿½ï¿½Ê½Î»ï¿½ÊºÏµÄ¸ï¿½Ê½ï¿½ï¿½Îªï¿½Ü¹ï¿½Ö±ï¿½Ó¶ï¿½Ó¦DXGIï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½×¼ï¿½ï¿½
+				//ï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½Ê½×ªï¿½ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pIWICFactory->CreateFormatConverter(&pIConverter));
-				//³õÊ¼»¯Ò»¸öÍ¼Æ¬×ª»»Æ÷£¬Êµ¼ÊÒ²¾ÍÊÇ½«Í¼Æ¬Êý¾Ý½øÐÐÁË¸ñÊ½×ª»»
-				GRS_THROW_IF_FAILED(pIConverter->Initialize(//ÅäÖÃ×ª»»Æ÷
-					pIWICFrame.Get(),                // ÊäÈëÔ­Í¼Æ¬Êý¾Ý
-					tgFormat,						 // Ö¸¶¨´ý×ª»»µÄÄ¿±ê¸ñÊ½
-					WICBitmapDitherTypeNone,         // Ö¸¶¨Î»Í¼ÊÇ·ñÓÐµ÷É«°å£¬ÏÖ´ú¶¼ÊÇÕæ²ÊÎ»Í¼£¬²»ÓÃµ÷É«°å£¬ËùÒÔÎªNone
-					nullptr,                            // Ö¸¶¨µ÷É«°åÖ¸Õë
-					0.f,                             // Ö¸¶¨Alpha·§Öµ
-					WICBitmapPaletteTypeCustom       // µ÷É«°åÀàÐÍ£¬Êµ¼ÊÃ»ÓÐÊ¹ÓÃ£¬ËùÒÔÖ¸¶¨ÎªCustom
+				//ï¿½ï¿½Ê¼ï¿½ï¿½Ò»ï¿½ï¿½Í¼Æ¬×ªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½Ò²ï¿½ï¿½ï¿½Ç½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½Ý½ï¿½ï¿½ï¿½ï¿½Ë¸ï¿½Ê½×ªï¿½ï¿½
+				GRS_THROW_IF_FAILED(pIConverter->Initialize(//ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½ï¿½
+					pIWICFrame.Get(),                // ï¿½ï¿½ï¿½ï¿½Ô­Í¼Æ¬ï¿½ï¿½ï¿½ï¿½
+					tgFormat,						 // Ö¸ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½Ê½
+					WICBitmapDitherTypeNone,         // Ö¸ï¿½ï¿½Î»Í¼ï¿½Ç·ï¿½ï¿½Ðµï¿½É«ï¿½å£¬ï¿½Ö´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»Í¼ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½É«ï¿½å£¬ï¿½ï¿½ï¿½ï¿½ÎªNone
+					nullptr,                            // Ö¸ï¿½ï¿½ï¿½ï¿½É«ï¿½ï¿½Ö¸ï¿½ï¿½
+					0.f,                             // Ö¸ï¿½ï¿½Alphaï¿½ï¿½Öµ
+					WICBitmapPaletteTypeCustom       // ï¿½ï¿½É«ï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½Êµï¿½ï¿½Ã»ï¿½ï¿½Ê¹ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ÎªCustom
 				));
-				// µ÷ÓÃQueryInterface·½·¨»ñµÃ¶ÔÏóµÄÎ»Í¼Êý¾ÝÔ´½Ó¿Ú
+				// ï¿½ï¿½ï¿½ï¿½QueryInterfaceï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½ï¿½ï¿½ï¿½Î»Í¼ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ó¿ï¿½
 				GRS_THROW_IF_FAILED(pIConverter.As(&pIBMPEarth));
 			}
 			else
 			{
-				//Í¼Æ¬Êý¾Ý¸ñÊ½²»ÐèÒª×ª»»£¬Ö±½Ó»ñÈ¡ÆäÎ»Í¼Êý¾ÝÔ´½Ó¿Ú
+				//Í¼Æ¬ï¿½ï¿½ï¿½Ý¸ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Òª×ªï¿½ï¿½ï¿½ï¿½Ö±ï¿½Ó»ï¿½È¡ï¿½ï¿½Î»Í¼ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ó¿ï¿½
 				GRS_THROW_IF_FAILED(pIWICFrame.As(&pIBMPEarth));
 			}
-			//»ñµÃÍ¼Æ¬´óÐ¡£¨µ¥Î»£ºÏñËØ£©
+			//ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½
 			GRS_THROW_IF_FAILED(pIBMPEarth->GetSize(&nTxtWEarth, &nTxtHEarth));
-			//»ñÈ¡Í¼Æ¬ÏñËØµÄÎ»´óÐ¡µÄBPP£¨Bits Per Pixel£©ÐÅÏ¢£¬ÓÃÒÔ¼ÆËãÍ¼Æ¬ÐÐÊý¾ÝµÄÕæÊµ´óÐ¡£¨µ¥Î»£º×Ö½Ú£©
-			GRS_THROW_IF_FAILED(pIWICFactory->CreateComponentInfo(tgFormat, pIWICmntinfo.GetAddressOf()));//»ñµÃÐÅÏ¢¶ÔÏó£¬ÕâÀïÀàËÆµÃµ½Ö¸ÕëpIWICmntinfo£¬Ö»ÊÇ&µÄÁíÒ»ÖÖÐÎÊ½
+			//ï¿½ï¿½È¡Í¼Æ¬ï¿½ï¿½ï¿½Øµï¿½Î»ï¿½ï¿½Ð¡ï¿½ï¿½BPPï¿½ï¿½Bits Per Pixelï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½ï¿½ï¿½Êµï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½Ö½Ú£ï¿½
+			GRS_THROW_IF_FAILED(pIWICFactory->CreateComponentInfo(tgFormat, pIWICmntinfo.GetAddressOf()));//ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÆµÃµï¿½Ö¸ï¿½ï¿½pIWICmntinfoï¿½ï¿½Ö»ï¿½ï¿½&ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ê½
 
 
 			GRS_THROW_IF_FAILED(pIWICmntinfo->GetComponentType(&type));
@@ -536,42 +568,42 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				throw CGRSCOMException(S_FALSE);
 			}
 			GRS_THROW_IF_FAILED(pIWICmntinfo.As(&pIWICPixelinfo));
-			// µ½ÕâÀïÖÕÓÚ¿ÉÒÔµÃµ½BPPÁË£¬ÕâÒ²ÊÇÎÒ¿´µÄ±È½ÏÍÂÑªµÄµØ·½£¬ÎªÁËBPP¾ÓÈ»ÈÄÁËÕâÃ´¶à»·½Ú
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¿ï¿½ï¿½ÔµÃµï¿½BPPï¿½Ë£ï¿½ï¿½ï¿½Ò²ï¿½ï¿½ï¿½Ò¿ï¿½ï¿½Ä±È½ï¿½ï¿½ï¿½Ñªï¿½ÄµØ·ï¿½ï¿½ï¿½Îªï¿½ï¿½BPPï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã´ï¿½à»·ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pIWICPixelinfo->GetBitsPerPixel(&nBPPEarth));
-			// ¼ÆËãÍ¼Æ¬Êµ¼ÊµÄÐÐ´óÐ¡£¨µ¥Î»£º×Ö½Ú£©£¬ÕâÀïÊ¹ÓÃÁËÒ»¸öÉÏÈ¡Õû³ý·¨¼´£¨A+B-1£©/B £¬
-			// ÕâÔø¾­±»´«ËµÊÇÎ¢ÈíµÄÃæÊÔÌâ,Ï£ÍûÄãÒÑ¾­¶ÔËüÁËÈçÖ¸ÕÆ
+			// ï¿½ï¿½ï¿½ï¿½Í¼Æ¬Êµï¿½Êµï¿½ï¿½Ð´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½Ö½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½A+B-1ï¿½ï¿½/B ï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ëµï¿½ï¿½Î¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,Ï£ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½
 			nRowPitchEarth = GRS_UPPER_DIV(uint64_t(nTxtWEarth) * uint64_t(nBPPEarth), 8);
 		}
 
-		// ´ò¿ªÏÔÊ¾×ÓÏµÍ³µÄµ÷ÊÔÖ§³Ö
+		// ï¿½ï¿½ï¿½ï¿½Ê¾ï¿½ï¿½ÏµÍ³ï¿½Äµï¿½ï¿½ï¿½Ö§ï¿½ï¿½
 		{
 #if defined(_DEBUG)
 			ComPtr<ID3D12Debug> debugController;
 			if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
 			{
 				debugController->EnableDebugLayer();
-				// ´ò¿ª¸½¼ÓµÄµ÷ÊÔÖ§³Ö
+				// ï¿½ò¿ª¸ï¿½ï¿½ÓµÄµï¿½ï¿½ï¿½Ö§ï¿½ï¿½
 				nDXGIFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 			}
 #endif
 		}
 
-		// ´´½¨DXGI Factory¶ÔÏó
+		// ï¿½ï¿½ï¿½ï¿½DXGI Factoryï¿½ï¿½ï¿½ï¿½
 		{
 			GRS_THROW_IF_FAILED(CreateDXGIFactory2(nDXGIFactoryFlags, IID_PPV_ARGS(&pIDXGIFactory5)));
 			
 		}
 
-		// Ã¶¾ÙÊÊÅäÆ÷´´½¨Éè±¸
-		{//Ñ¡ÔñNUMA¼Ü¹¹µÄ¶ÀÏÔÀ´´´½¨3DÉè±¸¶ÔÏó,ÔÝÊ±ÏÈ²»Ö§³Ö¼¯ÏÔÁË£¬µ±È»Äã¿ÉÒÔÐÞ¸ÄÕâÐ©ÐÐÎª
+		// Ã¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½è±¸
+		{//Ñ¡ï¿½ï¿½NUMAï¿½Ü¹ï¿½ï¿½Ä¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½3Dï¿½è±¸ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½Ê±ï¿½È²ï¿½Ö§ï¿½Ö¼ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½Ð©ï¿½ï¿½Îª
 			DXGI_ADAPTER_DESC1 stAdapterDesc1 = {};
 			D3D12_FEATURE_DATA_ARCHITECTURE stArchitecture = {};
-			for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != pIDXGIFactory5->EnumAdapters1(adapterIndex, &pIAdapter1); ++adapterIndex)//»ñÈ¡Ã¶¾ÙÉè±¸¶ÔÏóÖ¸Õë
+			for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != pIDXGIFactory5->EnumAdapters1(adapterIndex, &pIAdapter1); ++adapterIndex)//ï¿½ï¿½È¡Ã¶ï¿½ï¿½ï¿½è±¸ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½
 			{
-				pIAdapter1->GetDesc1(&stAdapterDesc1);//»ñµÃÐÅÏ¢ÃèÊöÖ¸Õë£¬·ÅÈëstAdapterDesc1
+				pIAdapter1->GetDesc1(&stAdapterDesc1);//ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ë£¬ï¿½ï¿½ï¿½ï¿½stAdapterDesc1
 
 				if (stAdapterDesc1.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
-				{//Ìø¹ýÈí¼þÐéÄâÊÊÅäÆ÷Éè±¸
+				{//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½è±¸
 					continue;
 				}
 
@@ -589,7 +621,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 			
 			if (nullptr == pID3D12Device4.Get())
-			{// ¿ÉÁ¯µÄ»úÆ÷ÉÏ¾ÓÈ»Ã»ÓÐ¶ÀÏÔ »¹ÊÇÏÈÍË³öÁËÊÂ 
+			{// ï¿½ï¿½ï¿½ï¿½ï¿½Ä»ï¿½ï¿½ï¿½ï¿½Ï¾ï¿½È»Ã»ï¿½Ð¶ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë³ï¿½ï¿½ï¿½ï¿½ï¿½ 
 				throw CGRSCOMException(E_FAIL);
 			}
 
@@ -608,23 +640,23 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			nSamplerDescriptorSize = pID3D12Device4->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
 		}
 
-		// ´´½¨Ö±½ÓÃüÁî¶ÓÁÐ
+		// ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			D3D12_COMMAND_QUEUE_DESC stQueueDesc = {};
 			stQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommandQueue(&stQueueDesc, IID_PPV_ARGS(&pICMDQueue)));
 		}
 
-		// ´´½¨Ö±½ÓÃüÁîÁÐ±í¡¢À¦°ó°ü
+		// ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT
-				, IID_PPV_ARGS(&pICmdAllocDirect)));//AllocatorÒ²ÊÇÕâ¸öµÄ
+				, IID_PPV_ARGS(&pICmdAllocDirect)));//AllocatorÒ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-			//´´½¨Ö±½ÓÃüÁîÁÐ±í£¬ÔÚÆäÉÏ¿ÉÒÔÖ´ÐÐ¼¸ºõËùÓÐµÄÒýÇæÃüÁî£¨3DÍ¼ÐÎÒýÇæ¡¢¼ÆËãÒýÇæ¡¢¸´ÖÆÒýÇæµÈ£©
-			//×¢Òâ³õÊ¼Ê±²¢Ã»ÓÐÊ¹ÓÃPSO¶ÔÏó£¬´ËÊ±ÆäÊµÕâ¸öÃüÁîÁÐ±íÒÀÈ»¿ÉÒÔ¼ÇÂ¼ÃüÁî
+			//ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¿ï¿½ï¿½ï¿½Ö´ï¿½Ð¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î£¨3DÍ¼ï¿½ï¿½ï¿½ï¿½ï¿½æ¡¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ¡¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È£ï¿½
+			//×¢ï¿½ï¿½ï¿½Ê¼Ê±ï¿½ï¿½Ã»ï¿½ï¿½Ê¹ï¿½ï¿½PSOï¿½ï¿½ï¿½ó£¬´ï¿½Ê±ï¿½ï¿½Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½Ô¼ï¿½Â¼ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT
 				, pICmdAllocDirect.Get(), nullptr, IID_PPV_ARGS(&pICmdListDirect)));
-			//ºóÃæ3¸ölist£¬Ò»¸ödirect£¬Á½¸öbundles
+			//ï¿½ï¿½ï¿½ï¿½3ï¿½ï¿½listï¿½ï¿½Ò»ï¿½ï¿½directï¿½ï¿½ï¿½ï¿½ï¿½ï¿½bundles
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE
 				, IID_PPV_ARGS(&pICmdAllocEarth)));
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE
@@ -636,7 +668,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				, pICmdAllocSkybox.Get(), nullptr, IID_PPV_ARGS(&pIBundlesSkybox)));
 		}
 
-		// ´´½¨½»»»Á´
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			DXGI_SWAP_CHAIN_DESC1 stSwapChainDesc = {};
 			stSwapChainDesc.BufferCount = nFrameBackBufCount;
@@ -656,11 +688,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				&pISwapChain1
 			));
 
-			//×¢Òâ´Ë´¦Ê¹ÓÃÁË¸ß°æ±¾µÄSwapChain½Ó¿ÚµÄº¯Êý
+			//×¢ï¿½ï¿½Ë´ï¿½Ê¹ï¿½ï¿½ï¿½Ë¸ß°æ±¾ï¿½ï¿½SwapChainï¿½Ó¿ÚµÄºï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pISwapChain1.As(&pISwapChain3));
 			nCurrentFrameIndex = pISwapChain3->GetCurrentBackBufferIndex();
 
-			//´´½¨RTV(äÖÈ¾Ä¿±êÊÓÍ¼)ÃèÊö·û¶Ñ(ÕâÀï¶ÑµÄº¬ÒåÓ¦µ±Àí½âÎªÊý×é»òÕß¹Ì¶¨´óÐ¡ÔªËØµÄ¹Ì¶¨´óÐ¡ÏÔ´æ³Ø)
+			//ï¿½ï¿½ï¿½ï¿½RTV(ï¿½ï¿½È¾Ä¿ï¿½ï¿½ï¿½ï¿½Í¼)ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½(ï¿½ï¿½ï¿½ï¿½ÑµÄºï¿½ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¹Ì¶ï¿½ï¿½ï¿½Ð¡Ôªï¿½ØµÄ¹Ì¶ï¿½ï¿½ï¿½Ð¡ï¿½Ô´ï¿½ï¿½)
 			D3D12_DESCRIPTOR_HEAP_DESC stRTVHeapDesc = {};
 			stRTVHeapDesc.NumDescriptors = nFrameBackBufCount;
 			stRTVHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -668,23 +700,23 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateDescriptorHeap(&stRTVHeapDesc, IID_PPV_ARGS(&pIRTVHeap)));
 			
-			//stRTVHandleÓÖÄÜ×°ÏÂÒ»¶Ñ²»Í¬µÄRTV¶Ñ
-			D3D12_CPU_DESCRIPTOR_HANDLE stRTVHandle = { pIRTVHeap->GetCPUDescriptorHandleForHeapStart() };//RTVÃèÊö·û½á¹¹Ìå£¬ÀïÃæÖ»ÓÐpIRTVHeapÒ»¸ö
+			//stRTVHandleï¿½ï¿½ï¿½ï¿½×°ï¿½ï¿½Ò»ï¿½Ñ²ï¿½Í¬ï¿½ï¿½RTVï¿½ï¿½
+			D3D12_CPU_DESCRIPTOR_HANDLE stRTVHandle = { pIRTVHeap->GetCPUDescriptorHandleForHeapStart() };//RTVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½á¹¹ï¿½å£¬ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½pIRTVHeapÒ»ï¿½ï¿½
 			for (UINT i = 0; i < nFrameBackBufCount; i++)
-			{//Õâ¸öÑ­»·±©Â©ÁËÃèÊö·û¶ÑÊµ¼ÊÉÏÊÇ¸öÊý×éµÄ±¾ÖÊ
+			{//ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½Â©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½ï¿½ï¿½ï¿½Ç¸ï¿½ï¿½ï¿½ï¿½ï¿½Ä±ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pISwapChain3->GetBuffer(i, IID_PPV_ARGS(&pIARenderTargets[i])));
 				pID3D12Device4->CreateRenderTargetView(pIARenderTargets[i].Get(), nullptr, stRTVHandle);
 				stRTVHandle.ptr += nRTVDescriptorSize;
 			}
 
-			// ¹Ø±ÕALT+ENTER¼üÇÐ»»È«ÆÁµÄ¹¦ÄÜ£¬ÒòÎªÎÒÃÇÃ»ÓÐÊµÏÖOnSize´¦Àí£¬ËùÒÔÏÈ¹Ø±Õ
+			// ï¿½Ø±ï¿½ALT+ENTERï¿½ï¿½ï¿½Ð»ï¿½È«ï¿½ï¿½ï¿½Ä¹ï¿½ï¿½Ü£ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½Êµï¿½ï¿½OnSizeï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¹Ø±ï¿½
 			GRS_THROW_IF_FAILED(pIDXGIFactory5->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER));
 		}
 
-		// ´´½¨Éî¶È»º³å¼°Éî¶È»º³åÃèÊö·û¶Ñ
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È»ï¿½ï¿½å¼°ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
-			// 1. ¶¨Òå¶ÑÊôÐÔ
-			//¾ö¶¨Õâ¿éÏÔ´æÔÚÄÄÀï¡£Éî¶È»º³å±ØÐëÔÚ GPU ÏÔ´æÖÐ£¬CPU ²»ÐèÒªÖ±½Ó¶ÁÐ´Ëü
+			// 1. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¡£ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ GPU ï¿½Ô´ï¿½ï¿½Ð£ï¿½CPU ï¿½ï¿½ï¿½ï¿½ÒªÖ±ï¿½Ó¶ï¿½Ð´ï¿½ï¿½
 			D3D12_HEAP_PROPERTIES stDSBufHeapDesc = {};
 			stDSBufHeapDesc.Type = D3D12_HEAP_TYPE_DEFAULT;
 			stDSBufHeapDesc.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
@@ -693,71 +725,71 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stDSBufHeapDesc.VisibleNodeMask = 0;
 
 
-			// 2. ¶¨ÒåÉî¶ÈÊÓÍ¼ÃèÊö·û
+			// 2. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_DEPTH_STENCIL_VIEW_DESC stDepthStencilDesc = {};
-			stDepthStencilDesc.Format = emDSFormat;// ¶ÁÁË±äÁ¿¶¨ÒåµÄ¸ñÊ½
-			stDepthStencilDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D; // ÕâÊÇÒ»¸ö 2D ÎÆÀí
-			stDepthStencilDesc.Flags = D3D12_DSV_FLAG_NONE; // ÎÞÌØÊâ±êÖ¾£¨Ö»¶ÁµÈ£©
+			stDepthStencilDesc.Format = emDSFormat;// ï¿½ï¿½ï¿½Ë±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¸ï¿½Ê½
+			stDepthStencilDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D; // ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ 2D ï¿½ï¿½ï¿½ï¿½
+			stDepthStencilDesc.Flags = D3D12_DSV_FLAG_NONE; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½Ö»ï¿½ï¿½ï¿½È£ï¿½
 
 
-			// 3. ¶¨ÒåÓÅ»¯µÄÇå³ýÖµ 
+			// 3. ï¿½ï¿½ï¿½ï¿½ï¿½Å»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ 
 			D3D12_CLEAR_VALUE depthOptimizedClearValue = {};
 			depthOptimizedClearValue.Format = emDSFormat;
-			depthOptimizedClearValue.DepthStencil.Depth = 1.0f; // 1.0 = ÎÞÇîÔ¶£¬0.0 = ÑÛ¾¦´¦
+			depthOptimizedClearValue.DepthStencil.Depth = 1.0f; // 1.0 = ï¿½ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½0.0 = ï¿½Û¾ï¿½ï¿½ï¿½
 			depthOptimizedClearValue.DepthStencil.Stencil = 0;
 
 
-			// 4. ¶¨Òå×ÊÔ´ÃèÊö
-			// ÃèÊöÕâÕÅ¡°Í¼¡±µÄ³¤¡¢¿í¡¢ÀàÐÍ¡£
+			// 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å¡ï¿½Í¼ï¿½ï¿½ï¿½Ä³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¡ï¿½
 			D3D12_RESOURCE_DESC stDSResDesc = {};
-			stDSResDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; // 2D ÎÆÀí
-			stDSResDesc.Alignment = 0; // Ä¬ÈÏ¶ÔÆë£¨64KB£©
-			stDSResDesc.Width = iWndWidth;  // ¿í¶È£¨±ØÐëºÍäÖÈ¾´°¿Ú/½»»»Á´Ò»ÖÂ£©
-			stDSResDesc.Height = iWndHeight; // ¸ß¶È
-			stDSResDesc.DepthOrArraySize = 1; // Ö»ÓÐÒ»²ã£¬²»ÊÇÎÆÀíÊý×é
-			stDSResDesc.MipLevels = 0; // Éî¶ÈÍ¼²»ÐèÒª Mipmap (0 »ò 1)
-			stDSResDesc.Format = emDSFormat; // ¸ñÊ½±ØÐëÆ¥Åä
-			stDSResDesc.SampleDesc.Count = 1; // ²ÉÑùÊý 1 (¼´²»¿ªÆô MSAA ¿¹¾â³Ý)
+			stDSResDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; // 2D ï¿½ï¿½ï¿½ï¿½
+			stDSResDesc.Alignment = 0; // Ä¬ï¿½Ï¶ï¿½ï¿½ë£¨64KBï¿½ï¿½
+			stDSResDesc.Width = iWndWidth;  // ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¾ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Â£ï¿½
+			stDSResDesc.Height = iWndHeight; // ï¿½ß¶ï¿½
+			stDSResDesc.DepthOrArraySize = 1; // Ö»ï¿½ï¿½Ò»ï¿½ã£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			stDSResDesc.MipLevels = 0; // ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½Òª Mipmap (0 ï¿½ï¿½ 1)
+			stDSResDesc.Format = emDSFormat; // ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Æ¥ï¿½ï¿½
+			stDSResDesc.SampleDesc.Count = 1; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 1 (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ MSAA ï¿½ï¿½ï¿½ï¿½ï¿½)
 			stDSResDesc.SampleDesc.Quality = 0;
-			stDSResDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; // ÈÃÓ²¼þ×Ô¼º¾ö¶¨×îºÃµÄÄÚ´æÅÅ²¼
-			// ¡¾¹Ø¼ü±êÖ¾¡¿ÔÊÐí×÷ÎªÉî¶ÈÄ£°æÄ¿±ê¡£Èç¹û²»¼ÓÕâ¸ö£¬¾ÍÖ»ÄÜµ±ÆÕÍ¨Í¼Æ¬ÓÃ£¬²»ÄÜµ±Éî¶È»º³åÓÃ
+			stDSResDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; // ï¿½ï¿½Ó²ï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½Ú´ï¿½ï¿½Å²ï¿½
+			// ï¿½ï¿½ï¿½Ø¼ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½Ä£ï¿½ï¿½Ä¿ï¿½ê¡£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½Üµï¿½ï¿½ï¿½Í¨Í¼Æ¬ï¿½Ã£ï¿½ï¿½ï¿½ï¿½Üµï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½
 			stDSResDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
 
-			// 5. ´´½¨Ìá½»×ÊÔ´
-			// ÕâÒ»²½Í¬Ê±×öÁËÁ½¼þÊÂ£º1.ÉêÇëÏÔ´æ¶Ñ 2.ÔÚ¶ÑÉÏ´´½¨×ÊÔ´¡£
-			// ÆäÊµÓÃÕâ¸öÍµÀÁÁË£¬²»Ö±¹Û²»±ã¹ÜÀí¡£
+			// 5. ï¿½ï¿½ï¿½ï¿½ï¿½á½»ï¿½ï¿½Ô´
+			// ï¿½ï¿½Ò»ï¿½ï¿½Í¬Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â£ï¿½1.ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ 2.ï¿½Ú¶ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½
+			// ï¿½ï¿½Êµï¿½ï¿½ï¿½ï¿½ï¿½Íµï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½Ö±ï¿½Û²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateCommittedResource(
-				&stDSBufHeapDesc                // ¶ÑÊôÐÔ (GPU Default)
+				&stDSBufHeapDesc                // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (GPU Default)
 				, D3D12_HEAP_FLAG_NONE
-				, &stDSResDesc                   // ×ÊÔ´ÃèÊö
-				, D3D12_RESOURCE_STATE_DEPTH_WRITE // ³õÊ¼×´Ì¬£º×¼±¸±»Ð´ÈëÉî¶È
-				, &depthOptimizedClearValue      // ÓÅ»¯Çå³ýÖµ (±ØÐë´«£¬·ñÔò¿ÉÄÜ»á±¨´í»òÐÔÄÜÏÂ½µ)
-				, IID_PPV_ARGS(&pIDepthStencilBuffer) // Êä³ö£ºComPtr<ID3D12Resource> ¶ÔÏó
+				, &stDSResDesc                   // ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
+				, D3D12_RESOURCE_STATE_DEPTH_WRITE // ï¿½ï¿½Ê¼×´Ì¬ï¿½ï¿½×¼ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½
+				, &depthOptimizedClearValue      // ï¿½Å»ï¿½ï¿½ï¿½ï¿½Öµ (ï¿½ï¿½ï¿½ë´«ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü»á±¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â½ï¿½)
+				, IID_PPV_ARGS(&pIDepthStencilBuffer) // ï¿½ï¿½ï¿½ï¿½ï¿½ComPtr<ID3D12Resource> ï¿½ï¿½ï¿½ï¿½
 			));
 
 
-			// 6. ´´½¨ÃèÊö·û¶Ñ
-			// ÕâÊÇÒ»¸ö¡°¼Ü×Ó¡±£¬ÓÃÀ´´æ·Å DSV (Éî¶ÈÊÓÍ¼)
+			// 6. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ DSV (ï¿½ï¿½ï¿½ï¿½ï¿½Í¼)
 			D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-			dsvHeapDesc.NumDescriptors = 1; // ÎÒÃÇÖ»ÐèÒª´æ 1 ¸öÉî¶ÈÊÓÍ¼
-			dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; // ÀàÐÍ£ºDSV ×¨ÓÃ¶Ñ
-			dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // ²»ÐèÒª Shader ¿É¼û (DSV ²»ÔÚ Shader ÖÐÖ±½Ó¶ÁÈ¡)
+			dsvHeapDesc.NumDescriptors = 1; // ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½Òªï¿½ï¿½ 1 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼
+			dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; // ï¿½ï¿½ï¿½Í£ï¿½DSV ×¨ï¿½Ã¶ï¿½
+			dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // ï¿½ï¿½ï¿½ï¿½Òª Shader ï¿½É¼ï¿½ (DSV ï¿½ï¿½ï¿½ï¿½ Shader ï¿½ï¿½Ö±ï¿½Ó¶ï¿½È¡)
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&pIDSVHeap)));
 
-			// 7. ´´½¨ÊÓÍ¼
-			// ½«¡°×ÊÔ´(pIDepthStencilBuffer)¡±ºÍ¡°¼Ü×Ó(pIDSVHeap)¡±ÁªÏµÆðÀ´
+			// 7. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´(pIDepthStencilBuffer)ï¿½ï¿½ï¿½Í¡ï¿½ï¿½ï¿½ï¿½ï¿½(pIDSVHeap)ï¿½ï¿½ï¿½ï¿½Ïµï¿½ï¿½ï¿½ï¿½
 			pID3D12Device4->CreateDepthStencilView(
-				pIDepthStencilBuffer.Get() // Ô­Ê¼×ÊÔ´
-				, &stDepthStencilDesc        // ÊÓÍ¼ÃèÊö
-				, pIDSVHeap->GetCPUDescriptorHandleForHeapStart() // ¼Ü×ÓÉÏµÄÎ»ÖÃ (µÚ0ºÅ²ÛÎ»)
+				pIDepthStencilBuffer.Get() // Ô­Ê¼ï¿½ï¿½Ô´
+				, &stDepthStencilDesc        // ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½
+				, pIDSVHeap->GetCPUDescriptorHandleForHeapStart() // ï¿½ï¿½ï¿½ï¿½ï¿½Ïµï¿½Î»ï¿½ï¿½ (ï¿½ï¿½0ï¿½Å²ï¿½Î»)
 			);
 		}
 
-		// ´´½¨ SRV CBV Sample¶Ñ
+		// ï¿½ï¿½ï¿½ï¿½ SRV CBV Sampleï¿½ï¿½
 		{
 
-			//ÎÒÃÇ½«SRVÎÆÀíÊÓÍ¼ÃèÊö·û£¨ÊÓÍ¼View£©ºÍCBVÃèÊö·û·ÅÔÚÒ»¸öÃèÊö·û¶ÑÉÏ
+			//ï¿½ï¿½ï¿½Ç½ï¿½SRVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Viewï¿½ï¿½ï¿½ï¿½CBVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_DESCRIPTOR_HEAP_DESC stSRVHeapDesc = {};
 			stSRVHeapDesc.NumDescriptors = 2; //1 SRV + 1 CBV
 			stSRVHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -773,27 +805,27 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateDescriptorHeap(&stSamplerHeapDesc, IID_PPV_ARGS(&pISampleHpEarth)));
 
 
-			//Skybox µÄ SRV CBV Sample ¶Ñ
+			//Skybox ï¿½ï¿½ SRV CBV Sample ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateDescriptorHeap(&stSRVHeapDesc, IID_PPV_ARGS(&pISRVHpSkybox)));
-			stSamplerHeapDesc.NumDescriptors = 1; //Ìì¿ÕºÐ×Ó¾ÍÒ»¸ö²ÉÑùÆ÷
+			stSamplerHeapDesc.NumDescriptors = 1; //ï¿½ï¿½Õºï¿½ï¿½Ó¾ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateDescriptorHeap(&stSamplerHeapDesc, IID_PPV_ARGS(&pISampleHpSkybox)));
 
 			
 		}
 
-		// ´´½¨¸ùÇ©Ãû
-		{//Õâ¸öÀý×ÓÖÐ£¬ÇòÌåºÍSkyboxÊ¹ÓÃÏàÍ¬µÄ¸ùÇ©Ãû£¬ÒòÎªäÖÈ¾¹ý³ÌÖÐÐèÒªµÄ²ÎÊýÊÇÒ»ÑùµÄ
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç©ï¿½ï¿½
+		{//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½SkyboxÊ¹ï¿½ï¿½ï¿½ï¿½Í¬ï¿½Ä¸ï¿½Ç©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½È¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½Ä²ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½
 			D3D12_FEATURE_DATA_ROOT_SIGNATURE stFeatureData = {};
-			// ¼ì²âÊÇ·ñÖ§³ÖV1.1°æ±¾µÄ¸ùÇ©Ãû
+			// ï¿½ï¿½ï¿½ï¿½Ç·ï¿½Ö§ï¿½ï¿½V1.1ï¿½æ±¾ï¿½Ä¸ï¿½Ç©ï¿½ï¿½
 			stFeatureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
 			if (FAILED(pID3D12Device4->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &stFeatureData, sizeof(stFeatureData))))
-			{// 1.0°æ Ö±½Ó¶ªÒì³£ÍË³öÁË
+			{// 1.0ï¿½ï¿½ Ö±ï¿½Ó¶ï¿½ï¿½ì³£ï¿½Ë³ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(E_NOTIMPL);
 			}
-			// ÔÚGPUÉÏÖ´ÐÐSetGraphicsRootDescriptorTableºó£¬ÎÒÃÇ²»ÐÞ¸ÄÃüÁîÁÐ±íÖÐµÄSRV£¬Òò´ËÎÒÃÇ¿ÉÒÔÊ¹ÓÃÄ¬ÈÏRangÐÐÎª:
+			// ï¿½ï¿½GPUï¿½ï¿½Ö´ï¿½ï¿½SetGraphicsRootDescriptorTableï¿½ï¿½ï¿½ï¿½ï¿½Ç²ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½Ðµï¿½SRVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½Ä¬ï¿½ï¿½Rangï¿½ï¿½Îª:
 			// D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE
-			D3D12_DESCRIPTOR_RANGE1 stDSPRanges[3] = {};//Ò»¸ùÈýrange£¬ÒâÎ¶×ÅÈýÌ×ÉèÖÃ£¬µ«ÊÇ¸ùÈÝÆ÷»¹ÊÇÖ»ÉêÇëÁËÒ»¸ö
-			// ÕâÀï×°ÏÂÁËSRV/CBV/SAMPLE
+			D3D12_DESCRIPTOR_RANGE1 stDSPRanges[3] = {};//Ò»ï¿½ï¿½ï¿½ï¿½rangeï¿½ï¿½ï¿½ï¿½Î¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½Ç¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½×°ï¿½ï¿½ï¿½ï¿½SRV/CBV/SAMPLE
 
 			stDSPRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 			stDSPRanges[0].NumDescriptors = 1;
@@ -856,7 +888,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 		}
 
-		// ±àÒëShader´´½¨äÖÈ¾¹ÜÏß×´Ì¬¶ÔÏó
+		// ï¿½ï¿½ï¿½ï¿½Shaderï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¾ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½
 		{
 
 #if defined(_DEBUG)
@@ -868,7 +900,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			ComPtr<ID3DBlob>					pIVSEarth;
 			ComPtr<ID3DBlob>					pIPSEarth;
 
-			//±àÒëÎªÐÐ¾ØÕóÐÎÊ½	   
+			//ï¿½ï¿½ï¿½ï¿½Îªï¿½Ð¾ï¿½ï¿½ï¿½ï¿½ï¿½Ê½	   
 			nCompileFlags |= D3DCOMPILE_PACK_MATRIX_ROW_MAJOR;
 
 			TCHAR pszShaderFileName[MAX_PATH] = {};
@@ -880,7 +912,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			GRS_THROW_IF_FAILED(D3DCompileFromFile(pszShaderFileName, nullptr, nullptr
 				, "PSMain", "ps_5_0", nCompileFlags, 0, &pIPSEarth, nullptr));
 
-			// ÎÒÃÇ¶àÌí¼ÓÁËÒ»¸ö·¨ÏßµÄ¶¨Òå£¬µ«Ä¿Ç°ShaderÖÐÎÒÃÇ²¢Ã»ÓÐÊ¹ÓÃ
+			// ï¿½ï¿½ï¿½Ç¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ßµÄ¶ï¿½ï¿½å£¬ï¿½ï¿½Ä¿Ç°Shaderï¿½ï¿½ï¿½ï¿½ï¿½Ç²ï¿½Ã»ï¿½ï¿½Ê¹ï¿½ï¿½
 			D3D12_INPUT_ELEMENT_DESC stIALayoutEarth[] =
 			{
 				{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -888,7 +920,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 			};
 
-			// ´´½¨ graphics pipeline state object (PSO)¶ÔÏó
+			// ï¿½ï¿½ï¿½ï¿½ graphics pipeline state object (PSO)ï¿½ï¿½ï¿½ï¿½
 			D3D12_GRAPHICS_PIPELINE_STATE_DESC stPSODesc = {};
 			stPSODesc.InputLayout = { stIALayoutEarth, _countof(stIALayoutEarth) };
 			stPSODesc.pRootSignature = pIRootSignature.Get();
@@ -910,22 +942,22 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stPSODesc.RTVFormats[0] = emRTFormat;
 			stPSODesc.DSVFormat = emDSFormat;
 			stPSODesc.DepthStencilState.DepthEnable = TRUE;
-			stPSODesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//ÆôÓÃÉî¶È»º´æÐ´Èë¹¦ÄÜ
-			stPSODesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;     //Éî¶È²âÊÔº¯Êý£¨¸ÃÖµÎªÆÕÍ¨µÄÉî¶È²âÊÔ£©
-			stPSODesc.DepthStencilState.StencilEnable = FALSE;//Ä£°åÔÚÕâÀï±»½ûÓÃÁË
+			stPSODesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½Ð´ï¿½ë¹¦ï¿½ï¿½
+			stPSODesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;     //ï¿½ï¿½È²ï¿½ï¿½Ôºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÖµÎªï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½È²ï¿½ï¿½Ô£ï¿½
+			stPSODesc.DepthStencilState.StencilEnable = FALSE;//Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï±»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stPSODesc.SampleDesc.Count = 1;
 
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateGraphicsPipelineState(&stPSODesc
-				, IID_PPV_ARGS(&pIPSOEarth)));//´´½¨EatehµÄPSOÖ¸Õë
+				, IID_PPV_ARGS(&pIPSOEarth)));//ï¿½ï¿½ï¿½ï¿½Eatehï¿½ï¿½PSOÖ¸ï¿½ï¿½
 
 
-			//´´½¨µÚ¶þ¸öPSO£¬×¨ÊôÓÚÌì¿ÕºÐ
-			//±àÒëÎªÐÐ¾ØÕóÐÎÊ½	   
+			//ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½ï¿½PSOï¿½ï¿½×¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õºï¿½
+			//ï¿½ï¿½ï¿½ï¿½Îªï¿½Ð¾ï¿½ï¿½ï¿½ï¿½ï¿½Ê½	   
 			nCompileFlags |= D3DCOMPILE_PACK_MATRIX_ROW_MAJOR;
 
 			TCHAR pszSMFileSkybox[MAX_PATH] = {};
 
-			// ×¢Òâ£ºÂ·¾¶¿´×¼ÁË£¬Äã¸ÄÁËÎÄ¼þÕâ¸öÅä´íÁË¾Í»áÉÁÍË£¬±ðdebugµ½ÕâÐÐ²Å¼ÇµÃ
+			// ×¢ï¿½â£ºÂ·ï¿½ï¿½ï¿½ï¿½×¼ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¾Í»ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½debugï¿½ï¿½ï¿½ï¿½ï¿½Ð²Å¼Çµï¿½
 			StringCchPrintf(pszSMFileSkybox, MAX_PATH, _T("%sShader\\SkyBox.hlsl"), pszAppPath);
 
 			ComPtr<ID3DBlob>					pIVSSkybox;
@@ -936,16 +968,16 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			GRS_THROW_IF_FAILED(D3DCompileFromFile(pszSMFileSkybox, nullptr, nullptr
 				, "SkyboxPS", "ps_5_0", nCompileFlags, 0, &pIPSSkybox, nullptr));
 
-			// Ìì¿ÕºÐ×ÓÖ»ÓÐ¶¥µãÖ»ÓÐÎ»ÖÃ²ÎÊý
+			// ï¿½ï¿½Õºï¿½ï¿½ï¿½Ö»ï¿½Ð¶ï¿½ï¿½ï¿½Ö»ï¿½ï¿½Î»ï¿½Ã²ï¿½ï¿½ï¿½
 			D3D12_INPUT_ELEMENT_DESC stIALayoutSkybox[] =
 			{
 				{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 			};
 
-			// ´´½¨SkyboxµÄ(PSO)¶ÔÏó 
+			// ï¿½ï¿½ï¿½ï¿½Skyboxï¿½ï¿½(PSO)ï¿½ï¿½ï¿½ï¿½ 
 			stPSODesc.InputLayout = { stIALayoutSkybox, _countof(stIALayoutSkybox) };
 			//stPSODesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-			stPSODesc.DepthStencilState.DepthEnable = FALSE;//Éî¶È±»¹ØÁË
+			stPSODesc.DepthStencilState.DepthEnable = FALSE;//ï¿½ï¿½È±ï¿½ï¿½ï¿½ï¿½ï¿½
 			stPSODesc.DepthStencilState.StencilEnable = FALSE;
 			stPSODesc.VS.BytecodeLength = pIVSSkybox->GetBufferSize();
 			stPSODesc.VS.pShaderBytecode = pIVSSkybox->GetBufferPointer();
@@ -953,26 +985,26 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stPSODesc.PS.pShaderBytecode = pIPSSkybox->GetBufferPointer();
 
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateGraphicsPipelineState(&stPSODesc
-				, IID_PPV_ARGS(&pIPSOSkyBox)));//ÕâÀïPSOµÄÉèÖÃÖØÔØ£¬ÊÇ¸²Ð´´ò°üµÄÂß¼­
+				, IID_PPV_ARGS(&pIPSOSkyBox)));//ï¿½ï¿½ï¿½ï¿½PSOï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½Ç¸ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½
 		}
 
-		// ´´½¨ÎÆÀíµÄÄ¬ÈÏ¶Ñ¡¢ÉÏ´«¶Ñ²¢¼ÓÔØÎÆÀí
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½Ï¶Ñ¡ï¿½ï¿½Ï´ï¿½ï¿½Ñ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
-			D3D12_HEAP_DESC stTextureHeapDesc = {};//Õâ¸ö¾ÍÊÇÄ¬ÈÏ¶Ñ£¬Äã´´½¨µÄÊ±ºòÕâ¸ö¾ÍÊÇ¿ÕµÄ£¬ÍêÈ«»¹Ã»°Ñ¶«Î÷°á½øÈ¥¡£
-			//Îª¶ÑÖ¸¶¨ÎÆÀíÍ¼Æ¬ÖÁÉÙ2±¶´óÐ¡µÄ¿Õ¼ä£¬ÕâÀïÃ»ÓÐÏêÏ¸È¥¼ÆËãÁË£¬Ö»ÊÇÖ¸¶¨ÁËÒ»¸ö×ã¹»´óµÄ¿Õ¼ä£¬¹»·ÅÎÆÀí¾ÍÐÐ
-			//Êµ¼ÊÓ¦ÓÃÖÐÒ²ÊÇÒª×ÛºÏ¿¼ÂÇ·ÖÅä¶ÑµÄ´óÐ¡£¬ÒÔ±ã¿ÉÒÔÖØÓÃ¶Ñ
+			D3D12_HEAP_DESC stTextureHeapDesc = {};//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½Ï¶Ñ£ï¿½ï¿½ã´´ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿ÕµÄ£ï¿½ï¿½ï¿½È«ï¿½ï¿½Ã»ï¿½Ñ¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¥ï¿½ï¿½
+			//Îªï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½2ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½Ä¿Õ¼ä£¬ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½Ï¸È¥ï¿½ï¿½ï¿½ï¿½ï¿½Ë£ï¿½Ö»ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ã¹»ï¿½ï¿½Ä¿Õ¼ä£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			//Êµï¿½ï¿½Ó¦ï¿½ï¿½ï¿½ï¿½Ò²ï¿½ï¿½Òªï¿½ÛºÏ¿ï¿½ï¿½Ç·ï¿½ï¿½ï¿½ÑµÄ´ï¿½Ð¡ï¿½ï¿½ï¿½Ô±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½
 			stTextureHeapDesc.SizeInBytes = GRS_UPPER(2 * nRowPitchEarth * nTxtHEarth, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
-			//Ö¸¶¨¶ÑµÄ¶ÔÆë·½Ê½£¬ÕâÀïÊ¹ÓÃÁËÄ¬ÈÏµÄ64K±ß½ç¶ÔÆë£¬ÒòÎªÎÒÃÇÔÝÊ±²»ÐèÒªMSAAÖ§³Ö
+			//Ö¸ï¿½ï¿½ï¿½ÑµÄ¶ï¿½ï¿½ë·½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½Ïµï¿½64Kï¿½ß½ï¿½ï¿½ï¿½ë£¬ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ÒªMSAAÖ§ï¿½ï¿½
 			stTextureHeapDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-			stTextureHeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;		//Ä¬ÈÏ¶ÑÀàÐÍ
+			stTextureHeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;		//Ä¬ï¿½Ï¶ï¿½ï¿½ï¿½ï¿½ï¿½
 			stTextureHeapDesc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 			stTextureHeapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-			//¾Ü¾øäÖÈ¾Ä¿±êÎÆÀí¡¢¾Ü¾øÉî¶ÈÀ¯°åÎÆÀí£¬Êµ¼Ê¾ÍÖ»ÊÇÓÃÀ´°Ú·ÅÆÕÍ¨ÎÆÀí
+			//ï¿½Ü¾ï¿½ï¿½ï¿½È¾Ä¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½Ê¾ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú·ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½
 			stTextureHeapDesc.Flags = D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES | D3D12_HEAP_FLAG_DENY_BUFFERS;
 
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateHeap(&stTextureHeapDesc, IID_PPV_ARGS(&pIRESHeapEarth)));
 
-			// ´´½¨2DÎÆÀí		
+			// ï¿½ï¿½ï¿½ï¿½2Dï¿½ï¿½ï¿½ï¿½		
 			stTextureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 			stTextureDesc.MipLevels = 1;
 			stTextureDesc.Format = emTxtFmtEarth; //DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -983,38 +1015,38 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stTextureDesc.SampleDesc.Count = 1;
 			stTextureDesc.SampleDesc.Quality = 0;
 			
-			//Ê¹ÓÃ¡°¶¨Î»·½Ê½¡±À´´´½¨ÎÆÀí£¬×¢ÒâÏÂÃæÕâ¸öµ÷ÓÃÄÚ²¿Êµ¼ÊÒÑ¾­Ã»ÓÐ´æ´¢·ÖÅäºÍÊÍ·ÅµÄÊµ¼Ê²Ù×÷ÁË£¬ËùÒÔÐÔÄÜºÜ¸ß
-			//Í¬Ê±¿ÉÒÔÔÚÕâ¸ö¶ÑÉÏ·´¸´µ÷ÓÃCreatePlacedResourceÀ´´´½¨²»Í¬µÄÎÆÀí£¬µ±È»Ç°ÌáÊÇËüÃÇ²»ÔÚ±»Ê¹ÓÃµÄÊ±ºò£¬²Å¿¼ÂÇ
-			//ÖØÓÃ¶Ñ
+			//Ê¹ï¿½Ã¡ï¿½ï¿½ï¿½Î»ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú²ï¿½Êµï¿½ï¿½ï¿½Ñ¾ï¿½Ã»ï¿½Ð´æ´¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í·Åµï¿½Êµï¿½Ê²ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÜºÜ¸ï¿½
+			//Í¬Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½CreatePlacedResourceï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È»Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç²ï¿½ï¿½Ú±ï¿½Ê¹ï¿½Ãµï¿½Ê±ï¿½ò£¬²Å¿ï¿½ï¿½ï¿½
+			//ï¿½ï¿½ï¿½Ã¶ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
 				pIRESHeapEarth.Get()
 				, 0
-				, &stTextureDesc				//¿ÉÒÔÊ¹ÓÃCD3DX12_RESOURCE_DESC::Tex2DÀ´¼ò»¯½á¹¹ÌåµÄ³õÊ¼»¯
-				, D3D12_RESOURCE_STATE_COPY_DEST//ÕâÀï³õÊ¼»¯Éè¶¨µÄÊ±ºò£¬ËµÃ÷ËûÊÇ±»¿½±´½øÈ¥µÄ¶ÔÏó
+				, &stTextureDesc				//ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½CD3DX12_RESOURCE_DESC::Tex2Dï¿½ï¿½ï¿½ò»¯½á¹¹ï¿½ï¿½Ä³ï¿½Ê¼ï¿½ï¿½
+				, D3D12_RESOURCE_STATE_COPY_DEST//ï¿½ï¿½ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½è¶¨ï¿½ï¿½Ê±ï¿½ï¿½Ëµï¿½ï¿½ï¿½ï¿½ï¿½Ç±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¥ï¿½Ä¶ï¿½ï¿½ï¿½
 				, nullptr
 				, IID_PPV_ARGS(&pITextureEarth)));
 			
-			//»ñÈ¡ÉÏ´«¶Ñ×ÊÔ´»º³åµÄ´óÐ¡£¬Õâ¸ö³ß´çÍ¨³£´óÓÚÊµ¼ÊÍ¼Æ¬µÄ³ß´ç
+			//ï¿½ï¿½È¡ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½Ä´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß´ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½Í¼Æ¬ï¿½Ä³ß´ï¿½
 			D3D12_RESOURCE_DESC stCopyDstDesc = pITextureEarth->GetDesc();
 			pID3D12Device4->GetCopyableFootprints(&stCopyDstDesc, 0, 1, 0, nullptr, nullptr, nullptr, &n64szUploadBufEarth);
 
 			
-			// ´´½¨ÉÏ´«¶Ñ
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½
 			D3D12_HEAP_DESC stUploadHeapDesc = {  };
-			//³ß´çÒÀÈ»ÊÇÊµ¼ÊÎÆÀíÊý¾Ý´óÐ¡µÄ2±¶²¢64K±ß½ç¶ÔÆë´óÐ¡
+			//ï¿½ß´ï¿½ï¿½ï¿½È»ï¿½ï¿½Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý´ï¿½Ð¡ï¿½ï¿½2ï¿½ï¿½ï¿½ï¿½64Kï¿½ß½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡
 			stUploadHeapDesc.SizeInBytes = GRS_UPPER(2 * n64szUploadBufEarth, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
-			//×¢ÒâÉÏ´«¶Ñ¿Ï¶¨ÊÇBufferÀàÐÍ£¬¿ÉÒÔ²»Ö¸¶¨¶ÔÆë·½Ê½£¬ÆäÄ¬ÈÏÊÇ64k±ß½ç¶ÔÆë
+			//×¢ï¿½ï¿½ï¿½Ï´ï¿½ï¿½Ñ¿Ï¶ï¿½ï¿½ï¿½Bufferï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½ï¿½Ô²ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ë·½Ê½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½ï¿½ï¿½ï¿½64kï¿½ß½ï¿½ï¿½ï¿½ï¿½
 			stUploadHeapDesc.Alignment = 0;
-			stUploadHeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;		//ÉÏ´«¶ÑÀàÐÍ
+			stUploadHeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;		//ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stUploadHeapDesc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 			stUploadHeapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-			//ÉÏ´«¶Ñ¾ÍÊÇ»º³å£¬¿ÉÒÔ°Ú·ÅÈÎÒâÊý¾Ý
+			//ï¿½Ï´ï¿½ï¿½Ñ¾ï¿½ï¿½Ç»ï¿½ï¿½å£¬ï¿½ï¿½ï¿½Ô°Ú·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stUploadHeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
 
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateHeap(&stUploadHeapDesc, IID_PPV_ARGS(&pIUploadHeapEarth)));
 
 			
-			// Ê¹ÓÃ¡°¶¨Î»·½Ê½¡±´´½¨ÓÃÓÚÉÏ´«ÎÆÀíÊý¾ÝµÄ»º³å×ÊÔ´
+			// Ê¹ï¿½Ã¡ï¿½ï¿½ï¿½Î»ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÝµÄ»ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
 			D3D12_RESOURCE_DESC stUploadBufDesc = {};
 			stUploadBufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 			stUploadBufDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -1035,22 +1067,22 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				, nullptr
 				, IID_PPV_ARGS(&pITextureUploadEarth)));
 
-			// ¼ÓÔØÍ¼Æ¬Êý¾ÝÖÁÉÏ´«¶Ñ£¬¼´Íê³ÉµÚÒ»¸öCopy¶¯×÷£¬´Ómemcpyº¯Êý¿ÉÖªÕâÊÇÓÉCPUÍê³ÉµÄ
-			//°´ÕÕ×ÊÔ´»º³å´óÐ¡À´·ÖÅäÊµ¼ÊÍ¼Æ¬Êý¾Ý´æ´¢µÄÄÚ´æ´óÐ¡
+			// ï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½Ñ£ï¿½ï¿½ï¿½ï¿½ï¿½Éµï¿½Ò»ï¿½ï¿½Copyï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½memcpyï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½CPUï¿½ï¿½Éµï¿½
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½Ý´æ´¢ï¿½ï¿½ï¿½Ú´ï¿½ï¿½Ð¡
 			void* pbPicData = GRS_CALLOC(n64szUploadBufEarth);
 			if (nullptr == pbPicData)
 			{
 				throw CGRSCOMException(HRESULT_FROM_WIN32(GetLastError()));
 			}
 
-			//´ÓÍ¼Æ¬ÖÐ¶ÁÈ¡³öÊý¾Ý£¬°´ÕÕÕæÊµÐÐ¾à¼ÆËã³öÀ´µÄÊý¾Ý£¬µÃµ½pbPicData£¬ÀàÐÍ±ÈÌØ
-			GRS_THROW_IF_FAILED(pIBMPEarth->CopyPixels(nullptr//ÀÏÔ¶µÄµØ·½£¬´´½¨µÄÎ»Í¼Ô´½Ó¿Ú£¬WIC×îºóÒ»²½
+			//ï¿½ï¿½Í¼Æ¬ï¿½Ð¶ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½Ð¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½Ãµï¿½pbPicDataï¿½ï¿½ï¿½ï¿½ï¿½Í±ï¿½ï¿½ï¿½
+			GRS_THROW_IF_FAILED(pIBMPEarth->CopyPixels(nullptr//ï¿½ï¿½Ô¶ï¿½ÄµØ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»Í¼Ô´ï¿½Ó¿Ú£ï¿½WICï¿½ï¿½ï¿½Ò»ï¿½ï¿½
 				, nRowPitchEarth
-				, static_cast<UINT>(nRowPitchEarth * nTxtHEarth)   //×¢ÒâÕâÀï²ÅÊÇÍ¼Æ¬Êý¾ÝÕæÊµµÄ´óÐ¡£¬Õâ¸öÖµÍ¨³£Ð¡ÓÚ»º³åµÄ´óÐ¡//Êµ¼ÊÐèÒªÕ¼Î»´óÐ¡*texÕÅÊý
-				, reinterpret_cast<BYTE*>(pbPicData)));//ÎÞ·ûºÅÕûÊýÇ¿×ªBYTE£¬Êý¾ÝÊä³öµ½Õâ¸öÖ¸Õë
+				, static_cast<UINT>(nRowPitchEarth * nTxtHEarth)   //×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½Ä´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ÖµÍ¨ï¿½ï¿½Ð¡ï¿½Ú»ï¿½ï¿½ï¿½Ä´ï¿½Ð¡//Êµï¿½ï¿½ï¿½ï¿½ÒªÕ¼Î»ï¿½ï¿½Ð¡*texï¿½ï¿½ï¿½ï¿½
+				, reinterpret_cast<BYTE*>(pbPicData)));//ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿×ªBYTEï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½
 
-			//{//ÏÂÃæÕâ¶Î´úÂëÀ´×ÔDX12µÄÊ¾Àý£¬Ö±½ÓÍ¨¹ýÌî³ä»º³å»æÖÆÁËÒ»¸öºÚ°×·½¸ñµÄÎÆÀí
-			// //»¹Ô­Õâ¶Î´úÂë£¬È»ºó×¢ÊÍÉÏÃæµÄCopyPixelsµ÷ÓÃ¿ÉÒÔ¿´µ½ºÚ°×·½¸ñÎÆÀíµÄÐ§¹û
+			//{//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½DX12ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½Ö±ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ä»ºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ú°×·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			// //ï¿½ï¿½Ô­ï¿½ï¿½Î´ï¿½ï¿½ë£¬È»ï¿½ï¿½×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½CopyPixelsï¿½ï¿½ï¿½Ã¿ï¿½ï¿½Ô¿ï¿½ï¿½ï¿½ï¿½Ú°×·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð§ï¿½ï¿½
 			//	const UINT rowPitch = nRowPitchEarth; //nTxtWEarth * 4; //static_cast<UINT>(n64szUploadBufEarth / nTxtHEarth);
 			//	const UINT cellPitch = rowPitch >> 3;		// The width of a cell in the checkboard texture.
 			//	const UINT cellHeight = nTxtWEarth >> 3;	// The height of a cell in the checkerboard texture.
@@ -1083,167 +1115,167 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			//	}
 			//}
 
-			//»ñÈ¡ÏòÉÏ´«¶Ñ¿½±´ÎÆÀíÊý¾ÝµÄÒ»Ð©ÎÆÀí×ª»»³ß´çÐÅÏ¢
-			//¶ÔÓÚ¸´ÔÓµÄDDSÎÆÀíÕâÊÇ·Ç³£±ØÒªµÄ¹ý³Ì
+			//ï¿½ï¿½È¡ï¿½ï¿½ï¿½Ï´ï¿½ï¿½Ñ¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½Ò»Ð©ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½ß´ï¿½ï¿½ï¿½Ï¢
+			//ï¿½ï¿½ï¿½Ú¸ï¿½ï¿½Óµï¿½DDSï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·Ç³ï¿½ï¿½ï¿½Òªï¿½Ä¹ï¿½ï¿½ï¿½
 
-			UINT   nNumSubresources = 1u;  //ÎÒÃÇÖ»ÓÐÒ»¸±Í¼Æ¬£¬¼´×Ó×ÊÔ´¸öÊýÎª1
+			UINT   nNumSubresources = 1u;  //ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½Ò»ï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½Îª1
 			UINT   nTextureRowNum = 0u;
 			UINT64 n64TextureRowSizes = 0u;
 			UINT64 n64RequiredSize = 0u;
 
 			stDestDesc = pITextureEarth->GetDesc();
 
-			pID3D12Device4->GetCopyableFootprints(&stDestDesc//´«Èë//Õâ¸öº¯Êý¾ÍÊÇÄÃÀ´»ñÈ¡ÐÅÏ¢µÄ¡£
+			pID3D12Device4->GetCopyableFootprints(&stDestDesc//ï¿½ï¿½ï¿½ï¿½//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½Ï¢ï¿½Ä¡ï¿½
 				, 0
 				, nNumSubresources
 				, 0
-				, &stTxtLayoutsEarth//´æÓÐ²¼¾ÖÊý¾Ý¡¢Ã¿ÐÐÆ«ÒÆÊý¾ÝµÈ£¬ÓÉn64TextureRowSizesÆ«ÒÆ¶ÔÆë»ñµÃ
-				, &nTextureRowNum//×ÜÐÐÊý
-				, &n64TextureRowSizes//Ã¿ÐÐÊµ¼ÊÊý¾Ý´óÐ¡
-				, &n64RequiredSize);//¶ÔÆëÆ«ÒÆºó£¬È«ÐÐ×Ü¹²ÉêÇë´óÐ¡£»ÕâÀïÒýÓÃµÄÈ«ÊÇ½ÓÊÜÊä³ö£¬DXÕæµÄºÜÏ²»¶¸ø½ÓÊÕÖµÓÃ&´«ÈëÐÞ¸Ä·µ»Ø
+				, &stTxtLayoutsEarth//ï¿½ï¿½ï¿½Ð²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý¡ï¿½Ã¿ï¿½ï¿½Æ«ï¿½ï¿½ï¿½ï¿½ï¿½ÝµÈ£ï¿½ï¿½ï¿½n64TextureRowSizesÆ«ï¿½Æ¶ï¿½ï¿½ï¿½ï¿½ï¿½
+				, &nTextureRowNum//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+				, &n64TextureRowSizes//Ã¿ï¿½ï¿½Êµï¿½ï¿½ï¿½ï¿½ï¿½Ý´ï¿½Ð¡
+				, &n64RequiredSize);//ï¿½ï¿½ï¿½ï¿½Æ«ï¿½Æºï¿½È«ï¿½ï¿½ï¿½Ü¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½È«ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½DXï¿½ï¿½Äºï¿½Ï²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½&ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä·ï¿½ï¿½ï¿½
 
-			//ÒòÎªÉÏ´«¶ÑÊµ¼Ê¾ÍÊÇCPU´«µÝÊý¾Ýµ½GPUµÄÖÐ½é
-			//ËùÒÔÎÒÃÇ¿ÉÒÔÊ¹ÓÃÊìÏ¤µÄMap·½·¨½«ËüÏÈÓ³Éäµ½CPUÄÚ´æµØÖ·ÖÐ
-			//È»ºóÎÒÃÇ°´ÐÐ½«Êý¾Ý¸´ÖÆµ½ÉÏ´«¶ÑÖÐ
-			//ÐèÒª×¢ÒâµÄÊÇÖ®ËùÒÔ°´ÐÐ¿½±´ÊÇÒòÎªGPU×ÊÔ´µÄÐÐ´óÐ¡
-			//ÓëÊµ¼ÊÍ¼Æ¬µÄÐÐ´óÐ¡ÊÇÓÐ²îÒìµÄ,¶þÕßµÄÄÚ´æ±ß½ç¶ÔÆëÒªÇóÊÇ²»Ò»ÑùµÄ
+			//ï¿½ï¿½Îªï¿½Ï´ï¿½ï¿½ï¿½Êµï¿½Ê¾ï¿½ï¿½ï¿½CPUï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½GPUï¿½ï¿½ï¿½Ð½ï¿½
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½Ï¤ï¿½ï¿½Mapï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó³ï¿½äµ½CPUï¿½Ú´ï¿½ï¿½Ö·ï¿½ï¿½
+			//È»ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½Ð½ï¿½ï¿½ï¿½ï¿½Ý¸ï¿½ï¿½Æµï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½
+			//ï¿½ï¿½Òª×¢ï¿½ï¿½ï¿½ï¿½ï¿½Ö®ï¿½ï¿½ï¿½Ô°ï¿½ï¿½Ð¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÎªGPUï¿½ï¿½Ô´ï¿½ï¿½ï¿½Ð´ï¿½Ð¡
+			//ï¿½ï¿½Êµï¿½ï¿½Í¼Æ¬ï¿½ï¿½ï¿½Ð´ï¿½Ð¡ï¿½ï¿½ï¿½Ð²ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½ï¿½ßµï¿½ï¿½Ú´ï¿½ß½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½Ç²ï¿½Ò»ï¿½ï¿½ï¿½ï¿½
 			BYTE* pData = nullptr;
-			GRS_THROW_IF_FAILED(pITextureUploadEarth->Map(0, nullptr, reinterpret_cast<void**>(&pData)));//mapÊÇÖ¸¶¨ÃÅ£¬ÃÅÈçºÎ£¬ÃÅÊÇpData£¬¿ÕÊý¾ÝÈÝÆ÷
+			GRS_THROW_IF_FAILED(pITextureUploadEarth->Map(0, nullptr, reinterpret_cast<void**>(&pData)));//mapï¿½ï¿½Ö¸ï¿½ï¿½ï¿½Å£ï¿½ï¿½ï¿½ï¿½ï¿½Î£ï¿½ï¿½ï¿½ï¿½ï¿½pDataï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-			BYTE* pDestSlice = reinterpret_cast<BYTE*>(pData) + stTxtLayoutsEarth.Offset;//Ä¿±êÇÐÆ¬£¬ÃÅÓëÌ¤½ø²½³¤¡£¼ÓÉÏ Offset ÊÇÎªÁËÍ¨ÓÃÐÔ(ËäÈ»ÕâÀïOffsetÊÇ0)¡£
-			BYTE* pSrcSlice = reinterpret_cast<BYTE*>(pbPicData);//Á½¸ö¶«Î÷ÉÔÎ¢×ª»»ÁË¸öÀàÐÍ¶øÒÑ
+			BYTE* pDestSlice = reinterpret_cast<BYTE*>(pData) + stTxtLayoutsEarth.Offset;//Ä¿ï¿½ï¿½ï¿½ï¿½Æ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì¤ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Offset ï¿½ï¿½Îªï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½(ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½Offsetï¿½ï¿½0)ï¿½ï¿½
+			BYTE* pSrcSlice = reinterpret_cast<BYTE*>(pbPicData);//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¢×ªï¿½ï¿½ï¿½Ë¸ï¿½ï¿½ï¿½ï¿½Í¶ï¿½ï¿½ï¿½
 			for (UINT y = 0; y < nTextureRowNum; ++y)
-			{	// Ä¿±êµØÖ·: ÉÏ´«¶ÑµÄÆðÊ¼ + (ÐÐºÅ * ÏÔ¿¨ÒªÇóµÄÐÐ¿í 2816)
-				// ×¢Òâ£ºÕâÀï³ËµÄÊÇ 2816£¡ÕâÒâÎ¶×ÅÃ¿¿½ÍêÒ»ÐÐ£¬Ö¸Õë»áÌø¹ý 16 ×Ö½ÚµÄ¿ÕÏ¶¡£
+			{	// Ä¿ï¿½ï¿½ï¿½Ö·: ï¿½Ï´ï¿½ï¿½Ñµï¿½ï¿½ï¿½Ê¼ + (ï¿½Ðºï¿½ * ï¿½Ô¿ï¿½Òªï¿½ï¿½ï¿½ï¿½Ð¿ï¿½ 2816)
+				// ×¢ï¿½â£ºï¿½ï¿½ï¿½ï¿½Ëµï¿½ï¿½ï¿½ 2816ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¶ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Ð£ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 16 ï¿½Ö½ÚµÄ¿ï¿½Ï¶ï¿½ï¿½
 				memcpy(pDestSlice + static_cast<SIZE_T>(stTxtLayoutsEarth.Footprint.RowPitch)* y
-					// Ô´µØÖ·: ÏµÍ³ÄÚ´æµÄÆðÊ¼ + (ÐÐºÅ * ÕæÊµÐÐ¿í 2800)
-					// ÕâÀïÊÇ½ô´ÕÅÅÁÐµÄ¡£
+					// Ô´ï¿½ï¿½Ö·: ÏµÍ³ï¿½Ú´ï¿½ï¿½ï¿½ï¿½Ê¼ + (ï¿½Ðºï¿½ * ï¿½ï¿½Êµï¿½Ð¿ï¿½ 2800)
+					// ï¿½ï¿½ï¿½ï¿½ï¿½Ç½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÐµÄ¡ï¿½
 					, pSrcSlice + static_cast<SIZE_T>(nRowPitchEarth)* y
-					// ¿½±´³¤¶È: Ö»¿½±´ÕæÊµÊý¾Ý³¤¶È (2800)
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½ï¿½Ý³ï¿½ï¿½ï¿½ (2800)
 					, nRowPitchEarth);
 			}
-			//È¡ÏûÓ³Éä ¶ÔÓÚÒ×±äµÄÊý¾ÝÈçÃ¿Ö¡µÄ±ä»»¾ØÕóµÈÊý¾Ý£¬¿ÉÒÔÈöÀÁ²»ÓÃUnmapÁË£¬
-			//ÈÃËü³£×¤ÄÚ´æ,ÒÔÌá¸ßÕûÌåÐÔÄÜ£¬ÒòÎªÃ¿´ÎMapºÍUnmapÊÇºÜºÄÊ±µÄ²Ù×÷
-			//ÒòÎªÏÖÔÚÆðÂë¶¼ÊÇ64Î»ÏµÍ³ºÍÓ¦ÓÃÁË£¬µØÖ·¿Õ¼äÊÇ×ã¹»µÄ£¬±»³¤ÆÚÕ¼ÓÃ²»»áÓ°ÏìÊ²Ã´
+			//È¡ï¿½ï¿½Ó³ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½×±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¿Ö¡ï¿½Ä±ä»»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Unmapï¿½Ë£ï¿½
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×¤ï¿½Ú´ï¿½,ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½ÎªÃ¿ï¿½ï¿½Mapï¿½ï¿½Unmapï¿½ÇºÜºï¿½Ê±ï¿½Ä²ï¿½ï¿½ï¿½
+			//ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ë¶¼ï¿½ï¿½64Î»ÏµÍ³ï¿½ï¿½Ó¦ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½Ö·ï¿½Õ¼ï¿½ï¿½ï¿½ï¿½ã¹»ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼ï¿½Ã²ï¿½ï¿½ï¿½Ó°ï¿½ï¿½Ê²Ã´
 			pITextureUploadEarth->Unmap(0, nullptr);
 
-			//ÊÍ·ÅÍ¼Æ¬Êý¾Ý£¬×öÒ»¸ö¸É¾»µÄ³ÌÐòÔ±
+			//ï¿½Í·ï¿½Í¼Æ¬ï¿½ï¿½ï¿½Ý£ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½É¾ï¿½ï¿½Ä³ï¿½ï¿½ï¿½Ô±
 			GRS_SAFE_FREE(pbPicData);
 		}
 
 
-		// Ê¹ÓÃDDSLoader¸¨Öúº¯Êý¼ÓÔØSkyboxµÄÎÆÀí
+		// Ê¹ï¿½ï¿½DDSLoaderï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Skyboxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			TCHAR pszSkyboxTextureFile[MAX_PATH] = {};
 			StringCchPrintf(pszSkyboxTextureFile, MAX_PATH, _T("%sAssets\\Sky_cube_1024.dds"), pszAppPath);
 
 			ID3D12Resource* pIResSkyBox = nullptr;
 
-			// LoadDDSTextureFromFile ÊÇ¸¨Öú¿âº¯Êý£¨DirectXTex »òÀàËÆ¿âÌá¹©£©
-			// ¹¦ÄÜ£º¶ÁÈ¡ÎÄ¼þÍ·£¬½âÎö¸ñÊ½£¬´´½¨ D3D12 ×ÊÔ´¶ÔÏó£¬²¢½«ÎÄ¼þÄÚÈÝµÄ¶þ½øÖÆÊý¾Ý¶ÁÈëÄÚ´æ
+			// LoadDDSTextureFromFile ï¿½Ç¸ï¿½ï¿½ï¿½ï¿½âº¯ï¿½ï¿½ï¿½ï¿½DirectXTex ï¿½ï¿½ï¿½ï¿½ï¿½Æ¿ï¿½ï¿½á¹©ï¿½ï¿½
+			// ï¿½ï¿½ï¿½Ü£ï¿½ï¿½ï¿½È¡ï¿½Ä¼ï¿½Í·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ D3D12 ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ó£¬²ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ÝµÄ¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶ï¿½ï¿½ï¿½ï¿½Ú´ï¿½
 			GRS_THROW_IF_FAILED(LoadDDSTextureFromFile(
-				pID3D12Device4.Get(),       // D3D12 Éè±¸Ö¸Õë£¬ÓÃÓÚ´´½¨×ÊÔ´
-				pszSkyboxTextureFile,       // ÍêÕûµÄÎÄ¼þÂ·¾¶
-				&pIResSkyBox,               // [Êä³ö] ´´½¨ºÃµÄÎÆÀí×ÊÔ´½Ó¿ÚÖ¸Õë£¨Í¨³£ÔÚ Default Heap ÉÏ£©
-				ddsData,                    // [Êä³ö] unique_ptr£¬¹ÜÀí¼ÓÔØµ½ÄÚ´æµÄÔ­Ê¼ÎÄ¼þ¶þ½øÖÆÊý¾Ý
-				arSubResources,             // [Êä³ö] vector£¬°üº¬ËùÓÐ×Ó×ÊÔ´£¨Mipmap¡¢Á¢·½ÌåÃæ£©µÄÊý¾ÝÖ¸ÕëºÍÐÐ¾àÐÅÏ¢
-				SIZE_MAX,                   // ×î´óÔÊÐí¼ÓÔØµÄ´óÐ¡£¬SIZE_MAX ±íÊ¾²»ÏÞÖÆ
-				&emAlphaMode,               // [Êä³ö] ·µ»ØÎÆÀíµÄ Alpha »ìºÏÄ£Ê½ÐÅÏ¢
-				&bIsCube));                 // [Êä³ö] ·µ»Ø²¼¶ûÖµ£¬È·ÈÏ¸Ã DDS ÊÇ·ñÎªÁ¢·½ÌåÌùÍ¼ (CubeMap)
+				pID3D12Device4.Get(),       // D3D12 ï¿½è±¸Ö¸ï¿½ë£¬ï¿½ï¿½ï¿½Ú´ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
+				pszSkyboxTextureFile,       // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½Â·ï¿½ï¿½
+				&pIResSkyBox,               // [ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ó¿ï¿½Ö¸ï¿½ë£¨Í¨ï¿½ï¿½ï¿½ï¿½ Default Heap ï¿½Ï£ï¿½
+				ddsData,                    // [ï¿½ï¿½ï¿½] unique_ptrï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Øµï¿½ï¿½Ú´ï¿½ï¿½Ô­Ê¼ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+				arSubResources,             // [ï¿½ï¿½ï¿½] vectorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Mipmapï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ£©ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½Ð¾ï¿½ï¿½ï¿½Ï¢
+				SIZE_MAX,                   // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ØµÄ´ï¿½Ð¡ï¿½ï¿½SIZE_MAX ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+				&emAlphaMode,               // [ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Alpha ï¿½ï¿½ï¿½Ä£Ê½ï¿½ï¿½Ï¢
+				&bIsCube));                 // [ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½Ø²ï¿½ï¿½ï¿½Öµï¿½ï¿½È·ï¿½Ï¸ï¿½ DDS ï¿½Ç·ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼ (CubeMap)
 
-			// ½«ÂãÖ¸Õë pIResSkyBox ¸½¼Óµ½ ComPtr ÖÇÄÜÖ¸Õë½øÐÐ¹ÜÀí
-			// ´ËÊ± pITextureSkybox Ö¸ÏòµÄ×ÊÔ´ÔÚ GPU Ä¬ÈÏ¶ÑÉÏ£¬µ«Êý¾ÝÉÐÎ´ÕýÈ·³õÊ¼»¯£¨ÐèÒª´Ó Upload Heap ¿½±´£©
-			pITextureSkybox.Attach(pIResSkyBox);//¶ÀÁ¢µÄ£¬´´½¨µÄ¿ÕÖ¸Õë£¬Ã»ÓÐ¾­ÀúearthÄÇÑùµÄ´´½¨
+			// ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ pIResSkyBox ï¿½ï¿½ï¿½Óµï¿½ ComPtr ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½Ð¹ï¿½ï¿½ï¿½
+			// ï¿½ï¿½Ê± pITextureSkybox Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ GPU Ä¬ï¿½Ï¶ï¿½ï¿½Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½È·ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ Upload Heap ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			pITextureSkybox.Attach(pIResSkyBox);//ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½Ö¸ï¿½ë£¬Ã»ï¿½Ð¾ï¿½ï¿½ï¿½earthï¿½ï¿½ï¿½ï¿½ï¿½Ä´ï¿½ï¿½ï¿½
 
-			// »ñÈ¡¸Õ²Å´´½¨µÄÎÆÀí×ÊÔ´µÄÃèÊö£¨¿í¡¢¸ß¡¢¸ñÊ½µÈ£©
-			// stCopyDstDescÕâ¸ö±äÁ¿ÓÐÍ¬ÃûµÄ£¬»ù±¾ÏàÍ¬£¬ÊÇÄÇÖÖËæÓÃËæÆúµÄÖÐ¼ä±äÁ¿
-			D3D12_RESOURCE_DESC stCopyDstDesc = pITextureSkybox->GetDesc();//nb£¬×ÊÔ´ÃèÊö·û²»ÊÇÉè¶¨ºÃµÄ£¬ÊÇÖ±½Ó»ñÈ¡µÄ
+			// ï¿½ï¿½È¡ï¿½Õ²Å´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¡ï¿½ï¿½ï¿½Ê½ï¿½È£ï¿½
+			// stCopyDstDescï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¼ï¿½ï¿½ï¿½ï¿½
+			D3D12_RESOURCE_DESC stCopyDstDesc = pITextureSkybox->GetDesc();//nbï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½è¶¨ï¿½ÃµÄ£ï¿½ï¿½ï¿½Ö±ï¿½Ó»ï¿½È¡ï¿½ï¿½
 			
 			pID3D12Device4->GetCopyableFootprints(
 				&stCopyDstDesc, 
 				0, 
-				static_cast<UINT>(arSubResources.size()), //   - 0, arSubResources.size(): ´ÓµÚ0¸ö×Ó×ÊÔ´¿ªÊ¼£¬¼ÆËãËùÓÐ×Ó×ÊÔ´
+				static_cast<UINT>(arSubResources.size()), //   - 0, arSubResources.size(): ï¿½Óµï¿½0ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
 				0, 
 				nullptr, 
 				nullptr, 
 				nullptr, 
-				&n64szUploadBufSkybox);//[Êä³ö] ½ÓÊÕËùÐèµÄÉÏ´«¶Ñ»º³åÇø×Ü´óÐ¡£¨×Ö½Ú£©£¬ÕâÀï»ñµÃµÄÊÇskyboxµÄ
+				&n64szUploadBufSkybox);//[ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½Ñ»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü´ï¿½Ð¡ï¿½ï¿½ï¿½Ö½Ú£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½skyboxï¿½ï¿½
 
-			// ÅäÖÃÉÏ´«¶Ñ (Upload Heap) µÄÊôÐÔ
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ (Upload Heap) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_HEAP_DESC stUploadHeapDesc = {};
 
-			// ÉèÖÃ¶ÑµÄ´óÐ¡£º
-			// GRS_UPPER ÊÇÒ»¸öºê£¬ÓÃÓÚ½øÐÐÄÚ´æ¶ÔÆë£¨Í¨³£¶ÔÆëµ½ 64KB »ò 4KB£©
-			// ÕâÀïÉêÇëÁË "¼ÆËã³öµÄ´óÐ¡ * 2" µÄ¿Õ¼ä¡£
-			// ³ËÒÔ 2 ÊÇÒ»ÖÖ±£ÊØµÄ×ö·¨£¨Buffer£©£¬È·±£ÓÐ×ã¹»µÄ¿Õ¼ä´¦Àí¶ÔÆëÌî³ä£¬»òÕßÎªºóÐø²Ù×÷ÁôÓàÁ¿¡£
+			// ï¿½ï¿½ï¿½Ã¶ÑµÄ´ï¿½Ð¡ï¿½ï¿½
+			// GRS_UPPER ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ê£¬ï¿½ï¿½ï¿½Ú½ï¿½ï¿½ï¿½ï¿½Ú´ï¿½ï¿½ï¿½ë£¨Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ëµ½ 64KB ï¿½ï¿½ 4KBï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ "ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä´ï¿½Ð¡ * 2" ï¿½Ä¿Õ¼ä¡£
+			// ï¿½ï¿½ï¿½ï¿½ 2 ï¿½ï¿½Ò»ï¿½Ö±ï¿½ï¿½Øµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Bufferï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ï¿½ã¹»ï¿½Ä¿Õ¼ä´¦ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ä£¬ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stUploadHeapDesc.SizeInBytes = GRS_UPPER(2 * n64szUploadBufSkybox, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 
-			// ÏêÏ¸ÉèÖÃ¶ÑµÄ²ÎÊý
-			stUploadHeapDesc.Alignment = 0;// Alignment = 0 ±íÊ¾Ê¹ÓÃÄ¬ÈÏ¶ÔÆë£¨¶ÑÍ¨³£ÊÇ 64KB ¶ÔÆë£©
+			// ï¿½ï¿½Ï¸ï¿½ï¿½ï¿½Ã¶ÑµÄ²ï¿½ï¿½ï¿½
+			stUploadHeapDesc.Alignment = 0;// Alignment = 0 ï¿½ï¿½Ê¾Ê¹ï¿½ï¿½Ä¬ï¿½Ï¶ï¿½ï¿½ë£¨ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ 64KB ï¿½ï¿½ï¿½ë£©
 			stUploadHeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
 			stUploadHeapDesc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 			stUploadHeapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-			stUploadHeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;// ±êÖ¾£ºÖ»ÔÊÐí·ÅÖÃ Buffer (»º³å) ÀàÐÍµÄ×ÊÔ´
+			stUploadHeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;// ï¿½ï¿½Ö¾ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Buffer (ï¿½ï¿½ï¿½ï¿½) ï¿½ï¿½ï¿½Íµï¿½ï¿½ï¿½Ô´
 
-			// ´´½¨¶Ñ£¬ÔÚ GPU ÏÔ´æ£¨»ò¹²ÏíÏÔ´æ£©ÖÐÊµ¼Ê·ÖÅäÄÚ´æ
-			GRS_THROW_IF_FAILED(pID3D12Device4->CreateHeap(&stUploadHeapDesc, IID_PPV_ARGS(&pIUploadHeapSkybox)));//skyboxÓÐ×Ô¼ºµÄÉÏ´«¶ÑÈÝÆ÷
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ñ£ï¿½ï¿½ï¿½ GPU ï¿½Ô´æ£¨ï¿½ï¿½ï¿½ï¿½ï¿½Ô´æ£©ï¿½ï¿½Êµï¿½Ê·ï¿½ï¿½ï¿½ï¿½Ú´ï¿½
+			GRS_THROW_IF_FAILED(pID3D12Device4->CreateHeap(&stUploadHeapDesc, IID_PPV_ARGS(&pIUploadHeapSkybox)));//skyboxï¿½ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
 
 
-			// ¶¨ÒåÉÏ´«¶ÑÉÏµÄ×ÊÔ´ÃèÊö
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½Ïµï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
 			D3D12_RESOURCE_DESC stUploadBufDesc = {};
-			stUploadBufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; // ÀàÐÍÊÇ»º³å
-			stUploadBufDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; // Ä¬ÈÏ¶ÔÆë(64KB)
-			stUploadBufDesc.Width = n64szUploadBufSkybox; // ÉÏÒ»²½¼ÆËã³öµÄ×Ü´óÐ¡
-			stUploadBufDesc.Height = 1; // Buffer ¸ß¶È¹Ì¶¨Îª 1
+			stUploadBufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; // ï¿½ï¿½ï¿½ï¿½ï¿½Ç»ï¿½ï¿½ï¿½
+			stUploadBufDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; // Ä¬ï¿½Ï¶ï¿½ï¿½ï¿½(64KB)
+			stUploadBufDesc.Width = n64szUploadBufSkybox; // ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü´ï¿½Ð¡
+			stUploadBufDesc.Height = 1; // Buffer ï¿½ß¶È¹Ì¶ï¿½Îª 1
 			stUploadBufDesc.DepthOrArraySize = 1;
 			stUploadBufDesc.MipLevels = 1;
-			stUploadBufDesc.Format = DXGI_FORMAT_UNKNOWN; // Buffer Ã»ÓÐÏñËØ¸ñÊ½
+			stUploadBufDesc.Format = DXGI_FORMAT_UNKNOWN; // Buffer Ã»ï¿½ï¿½ï¿½ï¿½ï¿½Ø¸ï¿½Ê½
 			stUploadBufDesc.SampleDesc.Count = 1;
 			stUploadBufDesc.SampleDesc.Quality = 0;
-			stUploadBufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; // ÏßÐÔ²¼¾Ö
+			stUploadBufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; // ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½
 			stUploadBufDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-			// ÔÚÒÑÓÐµÄ Upload Heap ÉÏ´´½¨×ÊÔ´¶ÔÏó
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ðµï¿½ Upload Heap ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
-				pIUploadHeapSkybox.Get(),            // Ö¸¶¨¸Õ²Å´´½¨µÄÉÏ´«¶Ñ
-				0,                                   // ¶ÑÄÚµÄÆ«ÒÆÁ¿£¬ÕâÀï´ÓÍ·¿ªÊ¼
-				&stUploadBufDesc,                    // ×ÊÔ´ÃèÊö
-				D3D12_RESOURCE_STATE_GENERIC_READ,   // ³õÊ¼×´Ì¬£ºUpload Heap ±ØÐëÊÇ CPU ¿É¶Á
-				nullptr,                             // ClearValue£¬Buffer ²»ÐèÒª
-				IID_PPV_ARGS(&pITextureUploadSkybox) // Êä³ö£ºÉÏ´«×ÊÔ´µÄ½Ó¿ÚÖ¸Õë
+				pIUploadHeapSkybox.Get(),            // Ö¸ï¿½ï¿½ï¿½Õ²Å´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½
+				0,                                   // ï¿½ï¿½ï¿½Úµï¿½Æ«ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í·ï¿½ï¿½Ê¼
+				&stUploadBufDesc,                    // ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
+				D3D12_RESOURCE_STATE_GENERIC_READ,   // ï¿½ï¿½Ê¼×´Ì¬ï¿½ï¿½Upload Heap ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ CPU ï¿½É¶ï¿½
+				nullptr,                             // ClearValueï¿½ï¿½Buffer ï¿½ï¿½ï¿½ï¿½Òª
+				IID_PPV_ARGS(&pITextureUploadSkybox) // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½Ô´ï¿½Ä½Ó¿ï¿½Ö¸ï¿½ï¿½
 			));
 
-			// ×¼±¸»ñÈ¡¸´ÔÓµÄ×Ó×ÊÔ´²¼¾ÖÐÅÏ¢
+			// ×¼ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½Óµï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
 			UINT nFirstSubresource = 0;
 
-			// arSubResources ÊÇ LoadDDSTextureFromFile ½âÎö³öÀ´µÄ£¬°üº¬ÁËËùÓÐ×Ó×ÊÔ´Êý¾Ý
+			// arSubResources ï¿½ï¿½ LoadDDSTextureFromFile ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
 			UINT nNumSubresources = static_cast<UINT>(arSubResources.size());
 			
-			// ÉÏ´«¶ÑÃèÊö
+			// ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_RESOURCE_DESC stUploadResDesc = pITextureUploadSkybox->GetDesc();
 			
-			// Ä¬ÈÏ¶ÑÃèÊö
+			// Ä¬ï¿½Ï¶ï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_RESOURCE_DESC stDefaultResDesc = pITextureSkybox->GetDesc();
 
 			UINT64 n64RequiredSize = 0;
 
 			// ============================================================================
-			// Îª²¼¾ÖÐÅÏ¢Êý×é·ÖÅäÄÚ´æ
-			// GetCopyableFootprints ÐèÒªÊä³öÊý×éÀ´´æ·ÅÃ¿Ò»¸ö×Ó×ÊÔ´µÄÐÅÏ¢¡£
-			// ÒòÎª×Ó×ÊÔ´ÊýÁ¿²»È·¶¨£¨È¡¾öÓÚ Mipmap ²ã¼¶£©£¬ËùÒÔÐèÒª¶¯Ì¬·ÖÅäÄÚ´æ¡£
-			// ÎÒÃÇÐèÒª´æ·ÅÈý¸öÊý×é£º
-			//   1. pLayouts: ´æ·ÅÃ¿¸ö×Ó×ÊÔ´µÄÆ«ÒÆºÍ footprint (D3D12_PLACED_SUBRESOURCE_FOOTPRINT)
-			//   2. pNumRows: ´æ·ÅÃ¿¸ö×Ó×ÊÔ´µÄÐÐÊý (UINT)
-			//   3. pRowSizesInBytes: ´æ·ÅÃ¿¸ö×Ó×ÊÔ´µÄÐÐ´óÐ¡ (UINT64)
+			// Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú´ï¿½
+			// GetCopyableFootprints ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¿Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½
+			// ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ Mipmap ï¿½ã¼¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½Ì¬ï¿½ï¿½ï¿½ï¿½ï¿½Ú´æ¡£
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½é£º
+			//   1. pLayouts: ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Æ«ï¿½Æºï¿½ footprint (D3D12_PLACED_SUBRESOURCE_FOOTPRINT)
+			//   2. pNumRows: ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (UINT)
+			//   3. pRowSizesInBytes: ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½Ð´ï¿½Ð¡ (UINT64)
 			// ============================================================================
 			SIZE_T szMemToAlloc = static_cast<UINT64>(sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT)
 				+ sizeof(UINT)
 				+ sizeof(UINT64))
-				* nNumSubresources; // ³ËÒÔ×Ó×ÊÔ´×ÜÊý
+				* nNumSubresources; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
 
-			// GRS_CALLOC ÊÇ×Ô¶¨Òåºê£¬Í¨³£µ÷ÓÃ HeapAlloc ²¢ÇåÁã¡£
-			// ËüµÄ×÷ÓÃÊÇÏòÏµÍ³ÉêÇëÒ»¿éÄÚ´æ£¬²¢ÇÒ·µ»ØµÄÊÇvoid*£¨ÎÞÀàÐÍÖ¸Õë£©¡£
+			// GRS_CALLOC ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ê£¬Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ HeapAlloc ï¿½ï¿½ï¿½ï¿½ï¿½ã¡£
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÏµÍ³ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ú´æ£¬ï¿½ï¿½ï¿½Ò·ï¿½ï¿½Øµï¿½ï¿½ï¿½void*ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ë£©ï¿½ï¿½
 			void* pMem = GRS_CALLOC(static_cast<SIZE_T>(szMemToAlloc));
 
 			if (nullptr == pMem)
@@ -1251,167 +1283,167 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				throw CGRSCOMException(HRESULT_FROM_WIN32(GetLastError()));
 			}
 
-			// Ö¸ÕëÔËËã£º½«·ÖÅäµÄÒ»´ó¿éÄÚ´æÇÐ·Ö¸øÈý¸öÊý×éÊ¹ÓÃ
-			D3D12_PLACED_SUBRESOURCE_FOOTPRINT* pLayouts = reinterpret_cast<D3D12_PLACED_SUBRESOURCE_FOOTPRINT*>(pMem);//µÄÒâË¼ÊÇ£º°Ñ pMem Õâ¸öÎÞÀàÐÍµÄÄÚ´æµØÖ·£¬Ç¿ÐÐ½âÊÍÎªÒ»¸ö D3D12_PLACED_SUBRESOURCE_FOOTPRINT ½á¹¹ÌåÊý×éµÄÊ×µØÖ·
+			// Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ã£ºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ú´ï¿½ï¿½Ð·Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½
+			D3D12_PLACED_SUBRESOURCE_FOOTPRINT* pLayouts = reinterpret_cast<D3D12_PLACED_SUBRESOURCE_FOOTPRINT*>(pMem);//ï¿½ï¿½ï¿½ï¿½Ë¼ï¿½Ç£ï¿½ï¿½ï¿½ pMem ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Íµï¿½ï¿½Ú´ï¿½ï¿½Ö·ï¿½ï¿½Ç¿ï¿½Ð½ï¿½ï¿½ï¿½ÎªÒ»ï¿½ï¿½ D3D12_PLACED_SUBRESOURCE_FOOTPRINT ï¿½á¹¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×µï¿½Ö·
 
-			// ×¢ÒâÌøµÄÊÇfootprint´óÐ¡
+			// ×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½footprintï¿½ï¿½Ð¡
 			UINT64* pRowSizesInBytes = reinterpret_cast<UINT64*>(pLayouts + nNumSubresources);
 
-			// pNumRows ½ô½Ó×Å pRowSizesInBytes Êý×éºóÃæ
+			// pNumRows ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ pRowSizesInBytes ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			UINT* pNumRows = reinterpret_cast<UINT*>(pRowSizesInBytes + nNumSubresources);
 
 		
-			// µÚÒ»´Îµ÷ÓÃÖ»ÊÇÎªÁËËã×Ü´óÐ¡£¬Õâ´Îµ÷ÓÃÊÇÎªÁËÌîÂúÉÏÃæ·ÖÅäµÄÊý×é
+			// ï¿½ï¿½Ò»ï¿½Îµï¿½ï¿½ï¿½Ö»ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½Ü´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½Îµï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			pID3D12Device4->GetCopyableFootprints(
-				&stDefaultResDesc,   // Ä¿±êÎÆÀíÃèÊö
-				nFirstSubresource,   // ¿ªÊ¼Ë÷Òý
-				nNumSubresources,    // ×Ó×ÊÔ´×ÜÊý
-				0,                   // Buffer ÖÐµÄÆðÊ¼Æ«ÒÆ (Base Offset)
-				pLayouts,            // [Êä³ö] ²¼¾ÖÐÅÏ¢Êý×é
-				pNumRows,            // [Êä³ö] ÐÐÊýÊý×é//Å¶Å£±Æ£¬Õâ¸öÒ²ÊÇ¸öÊý×é£¬È«¶¼´øsµÄ¡£¶ÔÓ¦²»Í¬µÄ³ß´çÓÐÍêÈ«²»Í¬µÄÖµ£¬ÏÂÃæÍ¬Àí
-				pRowSizesInBytes,    // [Êä³ö] ÐÐ´óÐ¡Êý×é
-				&n64RequiredSize     // [Êä³ö] ×Ü´óÐ¡
+				&stDefaultResDesc,   // Ä¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+				nFirstSubresource,   // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½
+				nNumSubresources,    // ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
+				0,                   // Buffer ï¿½Ðµï¿½ï¿½ï¿½Ê¼Æ«ï¿½ï¿½ (Base Offset)
+				pLayouts,            // [ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½
+				pNumRows,            // [ï¿½ï¿½ï¿½] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½//Å¶Å£ï¿½Æ£ï¿½ï¿½ï¿½ï¿½Ò²ï¿½Ç¸ï¿½ï¿½ï¿½ï¿½é£¬È«ï¿½ï¿½ï¿½ï¿½sï¿½Ä¡ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½Í¬ï¿½Ä³ß´ï¿½ï¿½ï¿½ï¿½ï¿½È«ï¿½ï¿½Í¬ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½
+				pRowSizesInBytes,    // [ï¿½ï¿½ï¿½] ï¿½Ð´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½
+				&n64RequiredSize     // [ï¿½ï¿½ï¿½] ï¿½Ü´ï¿½Ð¡
 			);
 
 			
 			BYTE* pData = nullptr;
 
-			// 0 ±íÊ¾²»¶ÁÈ¡£¬Ö»Ð´Èë£¬¿ÉÒÔÓÅ»¯ÐÔÄÜ
+			// 0 ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½Ö»Ð´ï¿½ë£¬ï¿½ï¿½ï¿½ï¿½ï¿½Å»ï¿½ï¿½ï¿½ï¿½ï¿½
 			HRESULT hr = pITextureUploadSkybox->Map(0, nullptr, reinterpret_cast<void**>(&pData));
 			if (FAILED(hr))
 			{
 				return 0;
 			}
 			
-			// µÚÒ»ÖØÑ­»·£º±éÀúËùÓÐ×Ó×ÊÔ´
+			// ï¿½ï¿½Ò»ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
 			for (UINT i = 0; i < nNumSubresources; ++i)
 			{
-				// ·ÀÓùÐÔ¼ì²é£ºÈ·±£ÎÒÃÇÒª¿½±´µÄÐÐ´óÐ¡Ã»ÓÐÒç³ö SIZE_T µÄ×î´óÖµ£¬Èç¹ûÕâÒ»ÐÐµÄ´óÐ¡´óµÃÀëÆ×£¨³¬¹ýÁËÏµÍ³ÄÜ±íÊ¾µÄ×î´óÄÚ´æ£©£¬¾Í±¨´í
+				// ï¿½ï¿½ï¿½ï¿½ï¿½Ô¼ï¿½é£ºÈ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½Ð¡Ã»ï¿½ï¿½ï¿½ï¿½ï¿½ SIZE_T ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ÐµÄ´ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÏµÍ³ï¿½Ü±ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú´æ£©ï¿½ï¿½ï¿½Í±ï¿½ï¿½ï¿½
 				if (pRowSizesInBytes[i] > (SIZE_T)-1)
 				{
 					throw CGRSCOMException(E_FAIL);
 				}
 
-				// ÕâÀïµÄ pLayouts[i] ¾ÍÊÇÎÒÃÇÖ®Ç°·Ñ¾¢Ëã³öÀ´µÄÊ×µØÖ·
+				// ï¿½ï¿½ï¿½ï¿½ï¿½ pLayouts[i] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö®Ç°ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×µï¿½Ö·
 				D3D12_MEMCPY_DEST stCopyDestData = {
-					// 1. pData: Ä¿±êÆðÊ¼µØÖ· = Upload Heap»ùµØÖ· + ÕâÕÅÐ¡Í¼µÄÆ«ÒÆÁ¿(Offset)
-					pData + pLayouts[i].Offset,//pData»ùµØÖ·£¬¼ÓplayoutsºóÃæ60¸öµÄ±éÀú
+					// 1. pData: Ä¿ï¿½ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½Ö· = Upload Heapï¿½ï¿½ï¿½ï¿½Ö· + ï¿½ï¿½ï¿½ï¿½Ð¡Í¼ï¿½ï¿½Æ«ï¿½ï¿½ï¿½ï¿½(Offset)
+					pData + pLayouts[i].Offset,//pDataï¿½ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½playoutsï¿½ï¿½ï¿½ï¿½60ï¿½ï¿½ï¿½Ä±ï¿½ï¿½ï¿½
 
-					// 2. RowPitch: Ä¿±êÐÐ¾à (ÏÔ¿¨ÒªÇóµÄ¶ÔÆë¿í¶È£¬±ÈÈç 256)
-					pLayouts[i].Footprint.RowPitch,//ÏÔ¿¨ÒªÇóµÄ¶ÔÆëÄ¿±êÐÐ¾à£¬·­µ½ÏÂÒ»ÐÐµÄÐÐ¾à
+					// 2. RowPitch: Ä¿ï¿½ï¿½ï¿½Ð¾ï¿½ (ï¿½Ô¿ï¿½Òªï¿½ï¿½Ä¶ï¿½ï¿½ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ï¿½ 256)
+					pLayouts[i].Footprint.RowPitch,//ï¿½Ô¿ï¿½Òªï¿½ï¿½Ä¶ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½Ð¾à£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½Ðµï¿½ï¿½Ð¾ï¿½
 
-					// 3. SlicePitch: Ä¿±êÇÐÆ¬´óÐ¡ (ÐÐ¾à * ÐÐÊý)
+					// 3. SlicePitch: Ä¿ï¿½ï¿½ï¿½ï¿½Æ¬ï¿½ï¿½Ð¡ (ï¿½Ð¾ï¿½ * ï¿½ï¿½ï¿½ï¿½)
 					pLayouts[i].Footprint.RowPitch * pNumRows[i]
 				};
 
 
-				// µÚ¶þÖØÑ­»·£º±éÀúÉî¶ÈÇÐÆ¬
-				// ¶ÔÓÚ Skybox (Cube Map) »òÆÕÍ¨ 2D ÎÆÀí£¬Depth Í¨³£ÊÇ 1
-				// Õâ¸öÑ­»·Ã²ËÆÊÇÎªÁË¼æÈÝ 3D ÎÆÀí
-				// ÄÇÕâÑùÔ­´úÂë×¢ÊÍÐ´µÄ "Mipmap" ÆäÊµ²»Ì«×¼È·£¬Mipmap ÊÇÓÉÍâ²ãÑ­»· i ¿ØÖÆµÄ
-				// ÕâÀï z ¿ØÖÆµÄÊÇ¡°ÌåÎÆÀí¡±µÄºñ¶È
+				// ï¿½Ú¶ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ¬
+				// ï¿½ï¿½ï¿½ï¿½ Skybox (Cube Map) ï¿½ï¿½ï¿½ï¿½Í¨ 2D ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Depth Í¨ï¿½ï¿½ï¿½ï¿½ 1
+				// ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½Ã²ï¿½ï¿½ï¿½ï¿½Îªï¿½Ë¼ï¿½ï¿½ï¿½ 3D ï¿½ï¿½ï¿½ï¿½
+				// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô­ï¿½ï¿½ï¿½ï¿½×¢ï¿½ï¿½Ð´ï¿½ï¿½ "Mipmap" ï¿½ï¿½Êµï¿½ï¿½Ì«×¼È·ï¿½ï¿½Mipmap ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ i ï¿½ï¿½ï¿½Æµï¿½
+				// ï¿½ï¿½ï¿½ï¿½ z ï¿½ï¿½ï¿½Æµï¿½ï¿½Ç¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Äºï¿½ï¿½
 				for (UINT z = 0; z < pLayouts[i].Footprint.Depth; ++z)
 				{
-					// ÆðÊ¼Î»ÖÃ + (ÇÐÆ¬Ë÷Òý * Ã¿Ò»¸öÇÐÆ¬µÄ´óÐ¡)
-					BYTE* pDestSlice = reinterpret_cast<BYTE*>(stCopyDestData.pData) + stCopyDestData.SlicePitch * z;//zÎª0Ê±£¬Õâ¸ö¾ÍÊÇÔ´µØÖ·
+					// ï¿½ï¿½Ê¼Î»ï¿½ï¿½ + (ï¿½ï¿½Æ¬ï¿½ï¿½ï¿½ï¿½ * Ã¿Ò»ï¿½ï¿½ï¿½ï¿½Æ¬ï¿½Ä´ï¿½Ð¡)
+					BYTE* pDestSlice = reinterpret_cast<BYTE*>(stCopyDestData.pData) + stCopyDestData.SlicePitch * z;//zÎª0Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Ö·
 
-					// arSubResources ÊÇ LoadDDSTextureFromFile ¼ÓÔØ½øÀ´µÄÔ­Ê¼Êý¾Ý
-					// Ô­Ê¼Êý¾ÝÊÇ½ô´ÕµÄ£¬SlicePitch Ò²ÊÇ½ô´ÕµÄ
+					// arSubResources ï¿½ï¿½ LoadDDSTextureFromFile ï¿½ï¿½ï¿½Ø½ï¿½ï¿½ï¿½ï¿½ï¿½Ô­Ê¼ï¿½ï¿½ï¿½ï¿½
+					// Ô­Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½Ç½ï¿½ï¿½ÕµÄ£ï¿½SlicePitch Ò²ï¿½Ç½ï¿½ï¿½Õµï¿½
 					const BYTE* pSrcSlice = reinterpret_cast<const BYTE*>(arSubResources[i].pData) + arSubResources[i].SlicePitch * z;
 
-					// µÚÈýÖØÑ­»·£º±éÀúÐÐ (Rows)¿½±´
-					// pNumRows[i] ÊÇÕâÕÅÐ¡Í¼µÄ¸ß¶È
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (Rows)ï¿½ï¿½ï¿½ï¿½
+					// pNumRows[i] ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡Í¼ï¿½Ä¸ß¶ï¿½
 					for (UINT y = 0; y < pNumRows[i]; ++y)
 					{
-						// memcpy(Ä¿±ê, Ô´, ´óÐ¡)
+						// memcpy(Ä¿ï¿½ï¿½, Ô´, ï¿½ï¿½Ð¡)
 						memcpy(
-							// Ä¿±êµØÖ·£ºµ±Ç°ÇÐÆ¬Æðµã + (ÐÐºÅ * ÏÔ´æ¶ÔÆëÐÐ¾à 256)
-							// ×¢Òâ£ºÕâÀïÓÃµÄÊÇ stCopyDestData.RowPitch£¬´øÓÐÌî³ä¿ÕÏ¶
-							pDestSlice + stCopyDestData.RowPitch * y,//y¾ö¶¨ÐÐ±àºÅ
+							// Ä¿ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½Æ¬ï¿½ï¿½ï¿½ + (ï¿½Ðºï¿½ * ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½Ð¾ï¿½ 256)
+							// ×¢ï¿½â£ºï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½ stCopyDestData.RowPitchï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¶
+							pDestSlice + stCopyDestData.RowPitch * y,//yï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½
 
-							// Ô´µØÖ·£ºµ±Ç°ÇÐÆ¬Æðµã + (ÐÐºÅ * Ô­Ê¼½ô´ÕÐÐ¾à 128)
-							// ×¢Òâ£ºÕâÀïÓÃµÄÊÇ arSubResources[i].RowPitch£¬Ã»ÓÐ¿ÕÏ¶
+							// Ô´ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½Æ¬ï¿½ï¿½ï¿½ + (ï¿½Ðºï¿½ * Ô­Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½Ð¾ï¿½ 128)
+							// ×¢ï¿½â£ºï¿½ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½ arSubResources[i].RowPitchï¿½ï¿½Ã»ï¿½Ð¿ï¿½Ï¶
 							pSrcSlice + arSubResources[i].RowPitch * y,
 
-							// ¿½±´´óÐ¡£ºÖ»¿½±´ÓÐÐ§Êý¾Ý³¤¶È (pRowSizesInBytes[i])
-							// ±ÈÈçÖ»¿½ 128 ×Ö½Ú¡£
-							// ÏÔ´æÀïÊ£ÏÂµÄ (256 - 128 = 128) ×Ö½Ú padding »á±£³ÖÎ´³õÊ¼»¯×´Ì¬£¬GPU ²»»áÈ¥¶ÁËü¡£
+							// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð§ï¿½ï¿½ï¿½Ý³ï¿½ï¿½ï¿½ (pRowSizesInBytes[i])
+							// ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ 128 ï¿½Ö½Ú¡ï¿½
+							// ï¿½Ô´ï¿½ï¿½ï¿½Ê£ï¿½Âµï¿½ (256 - 128 = 128) ï¿½Ö½ï¿½ padding ï¿½á±£ï¿½ï¿½Î´ï¿½ï¿½Ê¼ï¿½ï¿½×´Ì¬ï¿½ï¿½GPU ï¿½ï¿½ï¿½ï¿½È¥ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 							(SIZE_T)pRowSizesInBytes[i]
 						);
 					}
 				}
 			}
-			// ½áÊøÓ³Éä
+			// ï¿½ï¿½ï¿½ï¿½Ó³ï¿½ï¿½
 			pITextureUploadSkybox->Unmap(0, nullptr);
 
 			
-			// ÕâÊÇÒ»¸öÍ¨ÓÃµÄÉÏ´«´úÂëÄ£°å¡£
-			// ËäÈ»ÔÚÕâ¸ö Skybox µÄÀý×ÓÀï£¬ÎÒÃÇÈ·¶¨ÊÇ Texture£¨ËùÒÔ¿Ï¶¨×ß else£©
+			// ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½Í¨ï¿½Ãµï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½å¡£
+			// ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½ï¿½ Skybox ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï£¬ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½ Textureï¿½ï¿½ï¿½ï¿½ï¿½Ô¿Ï¶ï¿½ï¿½ï¿½ elseï¿½ï¿½
 			if (stDefaultResDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
 			{
-				// Buffer ÊÇÏßÐÔµÄ£¬Ã»ÓÐ¶þÎ¬½á¹¹£¬Ò²Ã»ÓÐ¸´ÔÓµÄ¶ÔÆëÒªÇó£¨ÐÐ¾à£©ËùÒÔ²»ÐèÒª·ÖÐÐ¡¢·ÖÇÐÆ¬£¬Ö±½ÓÒ»°ÑËó¸´ÖÆ¹ýÈ¥¾ÍÐÐ
+				// Buffer ï¿½ï¿½ï¿½ï¿½ï¿½ÔµÄ£ï¿½Ã»ï¿½Ð¶ï¿½Î¬ï¿½á¹¹ï¿½ï¿½Ò²Ã»ï¿½Ð¸ï¿½ï¿½ÓµÄ¶ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½Ð¾à£©ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½Æ¬ï¿½ï¿½Ö±ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Æ¹ï¿½È¥ï¿½ï¿½ï¿½ï¿½
 
 				pICmdListDirect->CopyBufferRegion(
-					pITextureSkybox.Get(),        // Ä¿±ê×ÊÔ´ (Default Heap)
-					0,                            // Ä¿±êÆ«ÒÆ (´ÓÍ·¿ªÊ¼Ð´)
-					pITextureUploadSkybox.Get(),  // Ô´×ÊÔ´ (Upload Heap)
-					pLayouts[0].Offset,           // Ô´Æ«ÒÆ (Í¨³£ Buffer ¾ÍÒ»¸ö×Ó×ÊÔ´£¬OffsetÍùÍùÊÇ0)
-					pLayouts[0].Footprint.Width   // ¸´ÖÆµÄ´óÐ¡ (¶ÔÓÚ Buffer£¬Width ¾ÍÊÇ×Ö½Ú×Ü³¤¶È)
+					pITextureSkybox.Get(),        // Ä¿ï¿½ï¿½ï¿½ï¿½Ô´ (Default Heap)
+					0,                            // Ä¿ï¿½ï¿½Æ«ï¿½ï¿½ (ï¿½ï¿½Í·ï¿½ï¿½Ê¼Ð´)
+					pITextureUploadSkybox.Get(),  // Ô´ï¿½ï¿½Ô´ (Upload Heap)
+					pLayouts[0].Offset,           // Ô´Æ«ï¿½ï¿½ (Í¨ï¿½ï¿½ Buffer ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Offsetï¿½ï¿½ï¿½ï¿½ï¿½ï¿½0)
+					pLayouts[0].Footprint.Width   // ï¿½ï¿½ï¿½ÆµÄ´ï¿½Ð¡ (ï¿½ï¿½ï¿½ï¿½ Bufferï¿½ï¿½Width ï¿½ï¿½ï¿½ï¿½ï¿½Ö½ï¿½ï¿½Ü³ï¿½ï¿½ï¿½)
 				);
 			}
 			else
 			{
 
-				// ±éÀúÃ¿Ò»¸ö×Ó×ÊÔ´ (6¸öÃæ * MipµÈ¼¶Êý)
+				// ï¿½ï¿½ï¿½ï¿½Ã¿Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ (6ï¿½ï¿½ï¿½ï¿½ * Mipï¿½È¼ï¿½ï¿½ï¿½)
 				for (UINT i = 0; i < nNumSubresources; ++i)
 				{
-					// ¶¨ÒåÄ¿µÄµØ
+					// ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½Äµï¿½
 					D3D12_TEXTURE_COPY_LOCATION stDstCopyLocation = {};
 
-					// Ä¿±ê×ÊÔ´£ºÄÇ¸ö×îÖÕÔÚ Default Heap ÉÏµÄ Cube Map ÎÆÀí
+					// Ä¿ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½Ç¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Default Heap ï¿½Ïµï¿½ Cube Map ï¿½ï¿½ï¿½ï¿½
 					stDstCopyLocation.pResource = pITextureSkybox.Get();
 					stDstCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 
-					// Ö¸¶¨×Ó×ÊÔ´Ë÷Òý£º±ÈÈçµÚ 0 ¸öÊÇ +X ÃæµÄ´óÍ¼£¬µÚ 1 ¸öÊÇ +X ÃæµÄÖÐÍ¼...
+					// Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 0 ï¿½ï¿½ï¿½ï¿½ +X ï¿½ï¿½Ä´ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ 1 ï¿½ï¿½ï¿½ï¿½ +X ï¿½ï¿½ï¿½ï¿½ï¿½Í¼...
 					stDstCopyLocation.SubresourceIndex = i;
 
-					// ¶¨ÒåÊý¾ÝÀ´Ô´
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
 					D3D12_TEXTURE_COPY_LOCATION stSrcCopyLocation = {};
 
-					// À´×ÔÉÏ´«¶Ñ
+					// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½
 					stSrcCopyLocation.pResource = pITextureUploadSkybox.Get();
 					stSrcCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-					stSrcCopyLocation.PlacedFootprint = pLayouts[i];//ÕâÀïÖ±½Ó·¢Ã¿¸ö×Ó×ÊÔ´¶ÔÓ¦µÄ²¼¾Ö¸ñÊ½ÁË
+					stSrcCopyLocation.PlacedFootprint = pLayouts[i];//ï¿½ï¿½ï¿½ï¿½Ö±ï¿½Ó·ï¿½Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Ó¦ï¿½Ä²ï¿½ï¿½Ö¸ï¿½Ê½ï¿½ï¿½
 
-					// Æô¶¯£¡
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 					pICmdListDirect->CopyTextureRegion(
-						&stDstCopyLocation, // Ä¿µÄµØÃèÊö
-						0, 0, 0,            // Ä¿±êÄÚµÄÆðÊ¼×ø±ê (X, Y, Z)£¬Í¨³£´Ó×óÉÏ½Ç(0,0,0)¿ªÊ¼Ð´
-						&stSrcCopyLocation, // Ô´Í·ÃèÊö
-						nullptr             // Ô´ÇøÓò¿ò£ºnullptr ±íÊ¾¸´ÖÆÕû¸ö Footprint ¶¨ÒåµÄÇøÓò
+						&stDstCopyLocation, // Ä¿ï¿½Äµï¿½ï¿½ï¿½ï¿½ï¿½
+						0, 0, 0,            // Ä¿ï¿½ï¿½ï¿½Úµï¿½ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ (X, Y, Z)ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï½ï¿½(0,0,0)ï¿½ï¿½Ê¼Ð´
+						&stSrcCopyLocation, // Ô´Í·ï¿½ï¿½ï¿½ï¿½
+						nullptr             // Ô´ï¿½ï¿½ï¿½ï¿½ï¿½nullptr ï¿½ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Footprint ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 					);
 				}
 			}
 
-			// Ê¹ÓÃBarrierÍ¬²½Ò»ÏÂ
+			// Ê¹ï¿½ï¿½BarrierÍ¬ï¿½ï¿½Ò»ï¿½ï¿½
 			D3D12_RESOURCE_BARRIER stTransResBarrier = {};
 			stTransResBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 			stTransResBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
 			stTransResBarrier.Transition.pResource = pITextureSkybox.Get();
 			stTransResBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
 			stTransResBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-			// Ö¸¶¨×Ó×ÊÔ´
+			// Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´
 			stTransResBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
-			// ½«Ö¸Áî²åÈëÃüÁîÁÐ±í
+			// ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½
 			pICmdListDirect->ResourceBarrier(1, &stTransResBarrier);
 		}
 
 		{}
-		//ÏòÖ±½ÓÃüÁîÁÐ±í·¢³ö´ÓÉÏ´«¶Ñ¸´ÖÆÎÆÀíÊý¾Ýµ½Ä¬ÈÏ¶ÑµÄÃüÁî£¬Ö´ÐÐ²¢Í¬²½µÈ´ý£¬¼´Íê³ÉµÚ¶þ¸öCopy¶¯×÷£¬ÓÉGPUÉÏµÄ¸´ÖÆÒýÇæÍê³É
-		//×¢Òâ´ËÊ±Ö±½ÓÃüÁîÁÐ±í»¹Ã»ÓÐ°ó¶¨PSO¶ÔÏó£¬Òò´ËËüÒ²ÊÇ²»ÄÜÖ´ÐÐ3DÍ¼ÐÎÃüÁîµÄ£¬µ«ÊÇ¿ÉÒÔÖ´ÐÐ¸´ÖÆÃüÁî£¬ÒòÎª¸´ÖÆÒýÇæ²»ÐèÒªÊ²Ã´
-		//¶îÍâµÄ×´Ì¬ÉèÖÃÖ®ÀàµÄ²ÎÊý
-		//µØÇòµÄ¿½±´£¬¿´ÆðÀ´¼òÖ±¼òµ¥µ½±¬Õ¨ÄØ£¬ÒòÎªÕâÊÇearthºó°ë²¿·ÖµÄÄÚÈÝ£¬Ç°Ãæupload¸´ÔÓµÄmemcpyÒÑ¾­×ö¹ýÁË£¬ÕâÀï¾ÍÖ»ÊÇupload¿½µ½default¶øÒÑ
+		//ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½Ñ¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ýµï¿½Ä¬ï¿½Ï¶Ñµï¿½ï¿½ï¿½ï¿½î£¬Ö´ï¿½Ð²ï¿½Í¬ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÉµÚ¶ï¿½ï¿½ï¿½Copyï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½GPUï¿½ÏµÄ¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+		//×¢ï¿½ï¿½ï¿½Ê±Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½Ã»ï¿½Ð°ï¿½PSOï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò²ï¿½Ç²ï¿½ï¿½ï¿½Ö´ï¿½ï¿½3DÍ¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½ï¿½ï¿½Ö´ï¿½Ð¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î£¬ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ²»ï¿½ï¿½ÒªÊ²Ã´
+		//ï¿½ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½Ö®ï¿½ï¿½Ä²ï¿½ï¿½ï¿½
+		//ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö±ï¿½òµ¥µï¿½ï¿½ï¿½Õ¨ï¿½Ø£ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½earthï¿½ï¿½ë²¿ï¿½Öµï¿½ï¿½ï¿½ï¿½Ý£ï¿½Ç°ï¿½ï¿½uploadï¿½ï¿½ï¿½Óµï¿½memcpyï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½uploadï¿½ï¿½ï¿½ï¿½defaultï¿½ï¿½ï¿½ï¿½
 		{
 			D3D12_TEXTURE_COPY_LOCATION stDstCopyLocation = {};
 			stDstCopyLocation.pResource = pITextureEarth.Get();
@@ -1425,8 +1457,8 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 			pICmdListDirect->CopyTextureRegion(&stDstCopyLocation, 0, 0, 0, &stSrcCopyLocation, nullptr);
 
-			//ÉèÖÃÒ»¸ö×ÊÔ´ÆÁÕÏ£¬Í¬²½²¢È·ÈÏ¸´ÖÆ²Ù×÷Íê³É
-			//Ö±½ÓÊ¹ÓÃ½á¹¹ÌåÈ»ºóµ÷ÓÃµÄÐÎÊ½
+			//ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½Ï£ï¿½Í¬ï¿½ï¿½ï¿½ï¿½È·ï¿½Ï¸ï¿½ï¿½Æ²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			//Ö±ï¿½ï¿½Ê¹ï¿½Ã½á¹¹ï¿½ï¿½È»ï¿½ï¿½ï¿½ï¿½Ãµï¿½ï¿½ï¿½Ê½
 			D3D12_RESOURCE_BARRIER stResBar = {};
 			stResBar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 			stResBar.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1439,57 +1471,57 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 		}
 
-		// Ö´ÐÐµÚ¶þ¸öCopyÃüÁî²¢È·¶¨ËùÓÐµÄÎÆÀí¶¼ÉÏ´«µ½ÁËÄ¬ÈÏ¶ÑÖÐ
+		// Ö´ï¿½ÐµÚ¶ï¿½ï¿½ï¿½Copyï¿½ï¿½ï¿½î²¢È·ï¿½ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½Ä¬ï¿½Ï¶ï¿½ï¿½ï¿½
 		{
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pIFence)));
 			n64FenceValue = 1;
-			//´´½¨Ò»¸öEventÍ¬²½¶ÔÏó£¬ÓÃÓÚµÈ´ýÎ§À¸ÊÂ¼þÍ¨Öª
+			//ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½EventÍ¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÚµÈ´ï¿½Î§ï¿½ï¿½ï¿½Â¼ï¿½Í¨Öª
 			hEventFence = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 			if (hEventFence == nullptr)
 			{
 				GRS_THROW_IF_FAILED(HRESULT_FROM_WIN32(GetLastError()));
 			}
 
-			// Ö´ÐÐÃüÁîÁÐ±í²¢µÈ´ýÎÆÀí×ÊÔ´ÉÏ´«Íê³É£¬ÕâÒ»²½ÊÇ±ØÐëµÄ
+			// Ö´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ï´ï¿½ï¿½ï¿½É£ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ç±ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pICmdListDirect->Close());
 
 			ID3D12CommandList* ppCommandLists[] = { pICmdListDirect.Get() };
 			pICMDQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
-			// µÈ´ýÎÆÀí×ÊÔ´ÕýÊ½¸´ÖÆÍê³ÉÏÈ
+			// ï¿½È´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			const UINT64 fence = n64FenceValue;
 			GRS_THROW_IF_FAILED(pICMDQueue->Signal(pIFence.Get(), fence));
 			n64FenceValue++;
 			GRS_THROW_IF_FAILED(pIFence->SetEventOnCompletion(fence, hEventFence));
 		}
 
-		// ¼ÓÔØÇòÌåµÄÍø¸ñÊý¾Ý
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
-			ifstream fin;//´úÂëÊ¹ÓÃ C++ ±ê×¼¿â ifstream ¶ÁÈ¡ÎÄ±¾ÎÄ¼þ
+			ifstream fin;//ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ C++ ï¿½ï¿½×¼ï¿½ï¿½ ifstream ï¿½ï¿½È¡ï¿½Ä±ï¿½ï¿½Ä¼ï¿½
 			char input;
 			USES_CONVERSION;
 			char pModuleFileName[MAX_PATH] = {};
 			StringCchPrintfA(pModuleFileName, MAX_PATH, "%sAssets\\sphere.txt", T2A(pszAppPath));
 			
-			// ´ò¿ªÎÄ¼þ
+			// ï¿½ï¿½ï¿½Ä¼ï¿½
 			fin.open(pModuleFileName);
-			// ´íÎó¼ì²é£ºÈç¹ûÎÄ¼þÃ»ÕÒµ½»ò´ò²»¿ª
+			// ï¿½ï¿½ï¿½ï¿½ï¿½é£ºï¿½ï¿½ï¿½ï¿½Ä¼ï¿½Ã»ï¿½Òµï¿½ï¿½ï¿½ò²»¿ï¿½
 			if (fin.fail())
 			{
-				throw CGRSCOMException(E_FAIL);//Òì³£
+				throw CGRSCOMException(E_FAIL);//ï¿½ì³£
 			}
-			// Âß¼­£º¶ÁÈ¡×Ö·ûÖ±µ½Óöµ½Ã°ºÅ ':'£¬Í¨³£ÓÃÓÚÌø¹ý±êÇ©£¨Vertices Count:£©
+			// ï¿½ß¼ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½Ö·ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã°ï¿½ï¿½ ':'ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç©ï¿½ï¿½Vertices Count:ï¿½ï¿½
 			fin.get(input);
 			while (input != ':')
 			{
 				fin.get(input);
 			}
-			// ¶ÁÈ¡Ã°ºÅºóµÄÕûÊý£¬¼´¶¥µãÊýÁ¿
+			// ï¿½ï¿½È¡Ã°ï¿½Åºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			fin >> nSphereVertexCnt;
-			// ÕâÀï¼òµ¥´Ö±©µØÁîË÷ÒýÊýµÈÓÚ¶¥µãÊý
+			// ï¿½ï¿½ï¿½ï¿½òµ¥´Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½ï¿½ï¿½ï¿½ï¿½
 			nSphereIndexCnt = nSphereVertexCnt;
 
-			// Âß¼­£ºÔÙ´Î¶ÁÈ¡Ö±µ½Óöµ½ÏÂÒ»¸öÃ°ºÅ£¨Data Start:£©
+			// ï¿½ß¼ï¿½ï¿½ï¿½ï¿½Ù´Î¶ï¿½È¡Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½Ã°ï¿½Å£ï¿½Data Start:ï¿½ï¿½
 			fin.get(input);
 			while (input != ':')
 			{
@@ -1498,62 +1530,62 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			fin.get(input);
 			fin.get(input);
 
-			//ÕâÀïÊ¹ÓÃÁËÇ°Ãæ¶¨ÒåµÄGRS_CALLOCºê£¬ËüµÄ×÷ÓÃÊÇÏòÏµÍ³ÉêÇëÒ»¿éÄÚ´æ£¬²¢ÇÒ·µ»ØµÄÊÇvoid*£¨ÎÞÀàÐÍÖ¸Õë£©¡£
-			//ºêºóÃæµÄÀ¨ºÅ£¬¾ÍÊÇÊäÈë×Ü¹²ÐèÒª¶àÉÙ×Ö½Ú£»Ç°À¨ºÅÊÇÇ¿ÖÆÀàÐÍ×ª»»
+			//ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½Ç°ï¿½æ¶¨ï¿½ï¿½ï¿½GRS_CALLOCï¿½ê£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÏµÍ³ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ú´æ£¬ï¿½ï¿½ï¿½Ò·ï¿½ï¿½Øµï¿½ï¿½ï¿½void*ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ë£©ï¿½ï¿½
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¹ï¿½ï¿½ï¿½Òªï¿½ï¿½ï¿½ï¿½ï¿½Ö½Ú£ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½
 			pstSphereVertices = (ST_GRS_VERTEX*)GRS_CALLOC(nSphereVertexCnt * sizeof(ST_GRS_VERTEX));
-			pSphereIndices = (UINT*)GRS_CALLOC(nSphereVertexCnt * sizeof(UINT));//¡¾´ý¸üÐÂ¡¿ÕâÀï´´½¨ÈÝÆ÷Ö¸ÕëµÄ·½·¨±È½ÏÀÏ£¬Ò²Ðí¿ÉÒÔÊ¹ÓÃÏÖ´úµÄÖ¸ÕëÈÝÆ÷
+			pSphereIndices = (UINT*)GRS_CALLOC(nSphereVertexCnt * sizeof(UINT));//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¡ï¿½ï¿½ï¿½ï¿½ï´´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½Ä·ï¿½ï¿½ï¿½ï¿½È½ï¿½ï¿½Ï£ï¿½Ò²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½Ö´ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
 			for (UINT i = 0; i < nSphereVertexCnt; i++)
 			{
-				// ÒÀ´Î¶ÁÈ¡£ºÎ»ÖÃ x, y, z
+				// ï¿½ï¿½ï¿½Î¶ï¿½È¡ï¿½ï¿½Î»ï¿½ï¿½ x, y, z
 				fin >> pstSphereVertices[i].m_v4Position.x
 					>> pstSphereVertices[i].m_v4Position.y
 					>> pstSphereVertices[i].m_v4Position.z;
-				// ÉèÖÃ w ·ÖÁ¿Îª 1.0 (Æë´Î×ø±êÏµÒªÇó£¬±íÊ¾ÕâÊÇÒ»¸öµã)
+				// ï¿½ï¿½ï¿½ï¿½ w ï¿½ï¿½ï¿½ï¿½Îª 1.0 (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÏµÒªï¿½ó£¬±ï¿½Ê¾ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½)
 				pstSphereVertices[i].m_v4Position.w = 1.0f;
-				// ÒÀ´Î¶ÁÈ¡£ºÎÆÀí×ø±ê u, v
+				// ï¿½ï¿½ï¿½Î¶ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ u, v
 				fin >> pstSphereVertices[i].m_vTex.x
 					>> pstSphereVertices[i].m_vTex.y;
-				// ÒÀ´Î¶ÁÈ¡£º·¨Ïß nx, ny, nz
+				// ï¿½ï¿½ï¿½Î¶ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ nx, ny, nz
 				fin >> pstSphereVertices[i].m_vNor.x
 					>> pstSphereVertices[i].m_vNor.y
 					>> pstSphereVertices[i].m_vNor.z;
-				// Éú³ÉË÷Òý£º0, 1, 2, ...
+				// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½0, 1, 2, ...
 				pSphereIndices[i] = i;
 			}
 		}
 
-		// ´´½¨¶¥µã»º³å¡¢Ë÷Òý»º³å¡¢³£Á¿»º³å
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ã»ºï¿½å¡¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½å¡¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			
 			UINT64 n64BufferOffset = GRS_UPPER(n64szUploadBufEarth, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 
-			// ¶¨Òå×ÊÔ´ÃèÊö½á¹¹Ìå
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½á¹¹ï¿½ï¿½
 			D3D12_RESOURCE_DESC stBufResDesc = {};
-			stBufResDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; // ÕâÊÇÒ»¸ö»º³å£¬²»ÊÇÎÆÀí
-			stBufResDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; // 64KB ¶ÔÆë
-			stBufResDesc.Width = nSphereVertexCnt * sizeof(ST_GRS_VERTEX); // ¿í¶È = ¶¥µã×Ü×Ö½ÚÊý
+			stBufResDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; // ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½å£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			stBufResDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT; // 64KB ï¿½ï¿½ï¿½ï¿½
+			stBufResDesc.Width = nSphereVertexCnt * sizeof(ST_GRS_VERTEX); // ï¿½ï¿½ï¿½ï¿½ = ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½
 			stBufResDesc.Height = 1;
 			stBufResDesc.DepthOrArraySize = 1;
 			stBufResDesc.MipLevels = 1;
-			stBufResDesc.Format = DXGI_FORMAT_UNKNOWN; // Buffer Í¨³£²»ÐèÒªÖ¸¶¨¸ñÊ½
+			stBufResDesc.Format = DXGI_FORMAT_UNKNOWN; // Buffer Í¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÒªÖ¸ï¿½ï¿½ï¿½ï¿½Ê½
 			stBufResDesc.SampleDesc.Count = 1;
-			stBufResDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; // Buffer ±ØÐëÊÇ Row Major
+			stBufResDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; // Buffer ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Row Major
 			stBufResDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-			// ´´½¨¶¥µã»º³å
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ã»ºï¿½ï¿½
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
-				pIUploadHeapEarth.Get(),         // Ö¸¶¨ÓÉÓÚÒÑ¾­·ÖÅäºÃµÄ¶Ñ (Upload Heap)
-				// µÚ¶þ¸öÁË£¬Ç°ÃæearthÎÆÀí°áÔËÒ²ÓÃµÄÕâ¸ö
-				n64BufferOffset,                 // Ö¸¶¨¶ÑÄÚµÄÆ«ÒÆÁ¿
-				&stBufResDesc,                   // ×ÊÔ´ÃèÊö
-				D3D12_RESOURCE_STATE_GENERIC_READ, // ³õÊ¼×´Ì¬ (Upload Heap ±ØÐëÊÇ Generic Read)
+				pIUploadHeapEarth.Get(),         // Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ÃµÄ¶ï¿½ (Upload Heap)
+				// ï¿½Ú¶ï¿½ï¿½ï¿½ï¿½Ë£ï¿½Ç°ï¿½ï¿½earthï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò²ï¿½Ãµï¿½ï¿½ï¿½ï¿½
+				n64BufferOffset,                 // Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½Æ«ï¿½ï¿½ï¿½ï¿½
+				&stBufResDesc,                   // ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½
+				D3D12_RESOURCE_STATE_GENERIC_READ, // ï¿½ï¿½Ê¼×´Ì¬ (Upload Heap ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Generic Read)
 				nullptr,
-				IID_PPV_ARGS(&pIVBEarth)));      // Êä³ö½Ó¿ÚÖ¸Õë
+				IID_PPV_ARGS(&pIVBEarth)));      // ï¿½ï¿½ï¿½ï¿½Ó¿ï¿½Ö¸ï¿½ï¿½
 
-			// Êý¾ÝÉÏ´« (Map -> Memcpy -> Unmap)
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ (Map -> Memcpy -> Unmap)
 			UINT8* pVertexDataBegin = nullptr;
-			D3D12_RANGE stReadRange = { 0, 0 }; // ÎÒÃÇ²»´òËã´Ó CPU ¶ÁÈ¡Õâ¸öÏÔ´æ£¬ËùÒÔ·¶Î§ÉèÎª 0
+			D3D12_RANGE stReadRange = { 0, 0 }; // ï¿½ï¿½ï¿½Ç²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ CPU ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½Ô´æ£¬ï¿½ï¿½ï¿½Ô·ï¿½Î§ï¿½ï¿½Îª 0
 
 			GRS_THROW_IF_FAILED(pIVBEarth->Map(0, &stReadRange, reinterpret_cast<void**>(&pVertexDataBegin)));
 
@@ -1561,21 +1593,21 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 			pIVBEarth->Unmap(0, nullptr);
 
-			// ÊÍ·Å CPU ¶ËµÄÁÙÊ±ÄÚ´æ
+			// ï¿½Í·ï¿½ CPU ï¿½Ëµï¿½ï¿½ï¿½Ê±ï¿½Ú´ï¿½
 			GRS_SAFE_FREE(pstSphereVertices);
 
-			// ´´½¨¶¥µã»º³åÊÓÍ¼
-			stVBVEarth.BufferLocation = pIVBEarth->GetGPUVirtualAddress(); // GPU ÏÔ´æµØÖ·
-			stVBVEarth.StrideInBytes = sizeof(ST_GRS_VERTEX);              // Ã¿¸ö¶¥µãµÄ²½³¤ (×Ö½Ú)
-			stVBVEarth.SizeInBytes = nSphereVertexCnt * sizeof(ST_GRS_VERTEX); // ×Ü´óÐ¡
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ã»ºï¿½ï¿½ï¿½ï¿½Í¼
+			stVBVEarth.BufferLocation = pIVBEarth->GetGPUVirtualAddress(); // GPU ï¿½Ô´ï¿½ï¿½Ö·
+			stVBVEarth.StrideInBytes = sizeof(ST_GRS_VERTEX);              // Ã¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä²ï¿½ï¿½ï¿½ (ï¿½Ö½ï¿½)
+			stVBVEarth.SizeInBytes = nSphereVertexCnt * sizeof(ST_GRS_VERTEX); // ï¿½Ü´ï¿½Ð¡
 
-			// ´´½¨Ë÷Òý»º³å (Index Buffer)
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (Index Buffer)
 			n64BufferOffset = GRS_UPPER(n64BufferOffset + nSphereVertexCnt * sizeof(ST_GRS_VERTEX), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 
-			// ¸üÐÂ×ÊÔ´ÃèÊöµÄ¿í¶ÈÎªË÷Òý»º³åµÄ´óÐ¡
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä´ï¿½Ð¡
 			stBufResDesc.Width = nSphereIndexCnt * sizeof(UINT);
 
-			// ÔÚ¶ÑµÄ¡°ÐÂÆ«ÒÆÎ»ÖÃ¡±´´½¨Ë÷Òý»º³å×ÊÔ´ pIIBEarth
+			// ï¿½Ú¶ÑµÄ¡ï¿½ï¿½ï¿½Æ«ï¿½ï¿½Î»ï¿½Ã¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ pIIBEarth
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
 				pIUploadHeapEarth.Get(),
 				n64BufferOffset,
@@ -1584,7 +1616,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				nullptr,
 				IID_PPV_ARGS(&pIIBEarth)));
 
-			// Êý¾ÝÉÏ´« (Map -> Copy -> Unmap)
+			// ï¿½ï¿½ï¿½ï¿½ï¿½Ï´ï¿½ (Map -> Copy -> Unmap)
 			UINT8* pIndexDataBegin = nullptr;
 			GRS_THROW_IF_FAILED(pIIBEarth->Map(0, &stReadRange, reinterpret_cast<void**>(&pIndexDataBegin)));
 			memcpy(pIndexDataBegin, pSphereIndices, nSphereIndexCnt * sizeof(UINT));
@@ -1592,19 +1624,19 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 			GRS_SAFE_FREE(pSphereIndices);
 
-			// ´´½¨Ë÷Òý»º³åÊÓÍ¼
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼
 			stIBVEarth.BufferLocation = pIIBEarth->GetGPUVirtualAddress();
-			stIBVEarth.Format = DXGI_FORMAT_R32_UINT; // Ö¸¶¨Ë÷Òý¸ñÊ½Îª 32Î» ÎÞ·ûºÅÕûÊý
+			stIBVEarth.Format = DXGI_FORMAT_R32_UINT; // Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½Îª 32Î» ï¿½Þ·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stIBVEarth.SizeInBytes = nSphereIndexCnt * sizeof(UINT);
 
-			// ´´½¨³£Á¿»º³å
-			// ¼ÆËãÏÂÒ»¸öÆ«ÒÆÁ¿ (Ë÷Òý»º³åÖ®ºó£¬ÔÙ´Î¶ÔÆë)
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½Æ«ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö®ï¿½ï¿½ï¿½Ù´Î¶ï¿½ï¿½ï¿½)
 			n64BufferOffset = GRS_UPPER(n64BufferOffset + nSphereIndexCnt * sizeof(UINT), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 
-			// ¸üÐÂ¿í¶ÈÎª³£Á¿»º³åµÄ´óÐ¡ (szMVPBuf Ó¦¸ÃÒÑ¾­ÊÇ 256×Ö½Ú¶ÔÆëµÄ´óÐ¡)
-			stBufResDesc.Width = szMVPBuf;//Õâ¸ö¾ÍÊÇbuffer´óÐ¡£¬·ÅÁËÔôÔ¶¸ãÁË¸öÈ«¾Ö±äÁ¿´æ×Å£¬Ê²Ã´·ÀÓùÐÔ±à³Ì£¬Ö±½ÓÄÃst»ñµÃsize²»µÃÁË
+			// ï¿½ï¿½ï¿½Â¿ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä´ï¿½Ð¡ (szMVPBuf Ó¦ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ 256ï¿½Ö½Ú¶ï¿½ï¿½ï¿½Ä´ï¿½Ð¡)
+			stBufResDesc.Width = szMVPBuf;//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½bufferï¿½ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½Ë¸ï¿½È«ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å£ï¿½Ê²Ã´ï¿½ï¿½ï¿½ï¿½ï¿½Ô±ï¿½Ì£ï¿½Ö±ï¿½ï¿½ï¿½ï¿½stï¿½ï¿½ï¿½sizeï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-			// ÔÚ¶ÑµÄ¡°ÐÂÆ«ÒÆÎ»ÖÃ¡±´´½¨³£Á¿»º³å×ÊÔ´ pICBUploadEarth
+			// ï¿½Ú¶ÑµÄ¡ï¿½ï¿½ï¿½Æ«ï¿½ï¿½Î»ï¿½Ã¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ pICBUploadEarth
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
 				pIUploadHeapEarth.Get(),
 				n64BufferOffset,
@@ -1613,13 +1645,13 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				nullptr,
 				IID_PPV_ARGS(&pICBUploadEarth)));
 
-			// Map ºóÃ»ÓÐ Unmap£¬Ò²Ã»ÓÐmemcpy£¬ÒòÎªÐ´ÈëconstantÔÚäÖÈ¾Ñ­»·ÖÐ½øÐÐ
+			// Map ï¿½ï¿½Ã»ï¿½ï¿½ Unmapï¿½ï¿½Ò²Ã»ï¿½ï¿½memcpyï¿½ï¿½ï¿½ï¿½ÎªÐ´ï¿½ï¿½constantï¿½ï¿½ï¿½ï¿½È¾Ñ­ï¿½ï¿½ï¿½Ð½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pICBUploadEarth->Map(0, nullptr, reinterpret_cast<void**>(&pMVPBufEarth)));
 		}
 
-		// ¼ÓÔØÌì¿ÕºÐ£¨Ô¶Æ½ÃæÐÍ£©
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÕºÐ£ï¿½Ô¶Æ½ï¿½ï¿½ï¿½Í£ï¿½
 		{
-			//×Ô½¨ndc£¬Õâ¸öÍ¦ÓÐÒâË¼µÄ£¬¿ÉÒÔÏ¸¿´
+			//ï¿½Ô½ï¿½ndcï¿½ï¿½ï¿½ï¿½ï¿½Í¦ï¿½ï¿½ï¿½ï¿½Ë¼ï¿½Ä£ï¿½ï¿½ï¿½ï¿½ï¿½Ï¸ï¿½ï¿½
 			float fHighW = -1.0f - (1.0f / (float)iWndWidth);
 			float fHighH = -1.0f - (1.0f / (float)iWndHeight);
 			float fLowW = 1.0f + (1.0f / (float)iWndWidth);
@@ -1635,7 +1667,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			nSkyboxIndexCnt = 4;
 			
 
-			//¼ÓÔØÌì¿ÕºÐ×ÓµÄÊý¾Ý
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õºï¿½ï¿½Óµï¿½ï¿½ï¿½ï¿½ï¿½
 			D3D12_RESOURCE_DESC stBufResDesc = {};
 			stBufResDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 			stBufResDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -1659,22 +1691,22 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				, nullptr
 				, IID_PPV_ARGS(&pIVBSkybox)));
 
-			//Ê¹ÓÃmap-memcpy-unmap´ó·¨½«Êý¾Ý´«ÖÁ¶¥µã»º³å¶ÔÏó
+			//Ê¹ï¿½ï¿½map-memcpy-unmapï¿½ó·¨½ï¿½ï¿½ï¿½ï¿½Ý´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ã»ºï¿½ï¿½ï¿½ï¿½ï¿½
 			ST_GRS_SKYBOX_VERTEX* pVertexDataBegin = nullptr;
 
 			GRS_THROW_IF_FAILED(pIVBSkybox->Map(0, nullptr, reinterpret_cast<void**>(&pVertexDataBegin)));
 			memcpy(pVertexDataBegin, stSkyboxVertices, nSkyboxIndexCnt * sizeof(ST_GRS_SKYBOX_VERTEX));
 			pIVBSkybox->Unmap(0, nullptr);
 
-			//´´½¨×ÊÔ´ÊÓÍ¼£¬Êµ¼Ê¿ÉÒÔ¼òµ¥Àí½âÎªÖ¸Ïò¶¥µã»º³åµÄÏÔ´æÖ¸Õë
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½Í¼ï¿½ï¿½Êµï¿½Ê¿ï¿½ï¿½Ô¼ï¿½ï¿½ï¿½ï¿½ï¿½ÎªÖ¸ï¿½ò¶¥µã»ºï¿½ï¿½ï¿½ï¿½Ô´ï¿½Ö¸ï¿½ï¿½
 			stVBVSkybox.BufferLocation = pIVBSkybox->GetGPUVirtualAddress();
 			stVBVSkybox.StrideInBytes = sizeof(ST_GRS_SKYBOX_VERTEX);
 			stVBVSkybox.SizeInBytes = nSkyboxIndexCnt * sizeof(ST_GRS_SKYBOX_VERTEX);
 
-			//¼ÆËã±ß½ç¶ÔÆëµÄÕýÈ·µÄÆ«ÒÆÎ»ÖÃ
+			//ï¿½ï¿½ï¿½ï¿½ß½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½Æ«ï¿½ï¿½Î»ï¿½ï¿½
 			n64BufferOffset = GRS_UPPER(n64BufferOffset + nSkyboxIndexCnt * sizeof(ST_GRS_SKYBOX_VERTEX), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 
-			// ´´½¨³£Á¿»º³å ×¢Òâ»º³å³ß´çÉèÖÃÎª256±ß½ç¶ÔÆë´óÐ¡
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ×¢ï¿½â»ºï¿½ï¿½ß´ï¿½ï¿½ï¿½ï¿½ï¿½Îª256ï¿½ß½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡
 			stBufResDesc.Width = szMVPBuf;
 			GRS_THROW_IF_FAILED(pID3D12Device4->CreatePlacedResource(
 				pIUploadHeapSkybox.Get()
@@ -1684,11 +1716,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 				, nullptr
 				, IID_PPV_ARGS(&pICBUploadSkybox)));
 
-			// Map Ö®ºó¾Í²»ÔÙUnmapÁË Ö±½Ó¸´ÖÆÊý¾Ý½øÈ¥ ÕâÑùÃ¿Ö¡¶¼²»ÓÃmap-copy-unmapÀË·ÑÊ±¼äÁË
+			// Map Ö®ï¿½ï¿½Í²ï¿½ï¿½ï¿½Unmapï¿½ï¿½ Ö±ï¿½Ó¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý½ï¿½È¥ ï¿½ï¿½ï¿½ï¿½Ã¿Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½map-copy-unmapï¿½Ë·ï¿½Ê±ï¿½ï¿½ï¿½ï¿½
 			GRS_THROW_IF_FAILED(pICBUploadSkybox->Map(0, nullptr, reinterpret_cast<void**>(&pMVPBufSkybox)));
 		}
 
-		// ´´½¨SRVÃèÊö·û
+		// ï¿½ï¿½ï¿½ï¿½SRVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			D3D12_SHADER_RESOURCE_VIEW_DESC stSRVDesc = {};
 			stSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1701,31 +1733,31 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
 			stSRVDesc.Format = stDescSkybox.Format;
 			stSRVDesc.TextureCube.MipLevels = stDescSkybox.MipLevels;
-			pID3D12Device4->CreateShaderResourceView(pITextureSkybox.Get(), &stSRVDesc, pISRVHpSkybox->GetCPUDescriptorHandleForHeapStart());//²Å·¢ÏÖ°¡£¬ViewµÄ´´½¨ÒÑ¾­²»»áÔÙ³ÖÓÐÄ³¸öÖ¸ÕëÁË£¬¾ÍÊÇÌîºÃÁËÉèÖÃÈ»ºó¾ÍÖ±½Ó´ÓpISRVHpSkyboxÃèÊö·ûºÍviewÅäÖÃ½á¹¹Ìå°ó¶¨¾ÍÊÇÁË
+			pID3D12Device4->CreateShaderResourceView(pITextureSkybox.Get(), &stSRVDesc, pISRVHpSkybox->GetCPUDescriptorHandleForHeapStart());//ï¿½Å·ï¿½ï¿½Ö°ï¿½ï¿½ï¿½Viewï¿½Ä´ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ù³ï¿½ï¿½ï¿½Ä³ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È»ï¿½ï¿½ï¿½Ö±ï¿½Ó´ï¿½pISRVHpSkyboxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½viewï¿½ï¿½ï¿½Ã½á¹¹ï¿½ï¿½ó¶¨¾ï¿½ï¿½ï¿½ï¿½ï¿½
 		}
 
-		// ´´½¨CBVÃèÊö·û
+		// ï¿½ï¿½ï¿½ï¿½CBVï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
 			cbvDesc.BufferLocation = pICBUploadEarth->GetGPUVirtualAddress();
 			cbvDesc.SizeInBytes = static_cast<UINT>(szMVPBuf);
 
-			D3D12_CPU_DESCRIPTOR_HANDLE stSRVCBVHandle = pISRVHpEarth->GetCPUDescriptorHandleForHeapStart();//Ô­×÷ÕßÐ´µÄ¾ÍÊÇ¹îÒì£¬ÕâÀïÄãÓÖµ¥¶À°ÑÕâ¸ö¶Ñhandleµ¥¶ÀÁà³öÀ´¡£
+			D3D12_CPU_DESCRIPTOR_HANDLE stSRVCBVHandle = pISRVHpEarth->GetCPUDescriptorHandleForHeapStart();//Ô­ï¿½ï¿½ï¿½ï¿½Ð´ï¿½Ä¾ï¿½ï¿½Ç¹ï¿½ï¿½ì£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½handleï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			stSRVCBVHandle.ptr += nSRVDescriptorSize;
 
-			pID3D12Device4->CreateConstantBufferView(&cbvDesc, stSRVCBVHandle);//ÎÒ²ÝÎÞµÐÁË£¬ºÏ×ÅÄãÕâ³¤µÃ»ù±¾Ò»ÑùµÄº¯ÊýÃû£¬Òª»ñµÃµÄ¶«Î÷¸ñÊ½»¹²»Ò»ÑùßÂ£¡ÎÒ¾ÍËµÔõÃ´»¹ÒªÔì¸öcbvDescÈÓ¸øÄã£¡
+			pID3D12Device4->CreateConstantBufferView(&cbvDesc, stSRVCBVHandle);//ï¿½Ò²ï¿½ï¿½Þµï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â³¤ï¿½Ã»ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Äºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½ÃµÄ¶ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Â£ï¿½ï¿½Ò¾ï¿½Ëµï¿½ï¿½Ã´ï¿½ï¿½Òªï¿½ï¿½ï¿½cbvDescï¿½Ó¸ï¿½ï¿½ã£¡
 
 			cbvDesc.BufferLocation = pICBUploadSkybox->GetGPUVirtualAddress();
 			cbvDesc.SizeInBytes = static_cast<UINT>(szMVPBuf);
 
-			D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvHandleSkybox = { pISRVHpSkybox->GetCPUDescriptorHandleForHeapStart() };//ÕâÀïÓÖ²»ÊÇÏë·Å¶àµãviewµ½¶ÑÀï¡£Áà³ö¸öÖÐÀ¨ºÅÉ¶ÒâË¼£¬Ç°×º»¹±äÁË£¬¸Ð¾õÓÐÐ©ÈßÓà
+			D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvHandleSkybox = { pISRVHpSkybox->GetCPUDescriptorHandleForHeapStart() };//ï¿½ï¿½ï¿½ï¿½ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½Å¶ï¿½ï¿½viewï¿½ï¿½ï¿½ï¿½ï¿½ï¡£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¶ï¿½ï¿½Ë¼ï¿½ï¿½Ç°×ºï¿½ï¿½ï¿½ï¿½ï¿½Ë£ï¿½ï¿½Ð¾ï¿½ï¿½ï¿½Ð©ï¿½ï¿½ï¿½ï¿½
 			cbvSrvHandleSkybox.ptr += nSRVDescriptorSize;
 
 			pID3D12Device4->CreateConstantBufferView(&cbvDesc, cbvSrvHandleSkybox);
 
 		}
 
-		// ´´½¨¸÷ÖÖ²ÉÑùÆ÷//ºËÐÄÊÇÉèÖÃ£¬È»ºó¸²Ð´´ò°ü×ö³ÉÃèÊö·û¡£
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½È»ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
 			D3D12_CPU_DESCRIPTOR_HANDLE hSamplerHeap = pISampleHpEarth->GetCPUDescriptorHandleForHeapStart();
 
@@ -1781,77 +1813,77 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			pID3D12Device4->CreateSampler(&stSamplerDesc, hSamplerHeap);
 
 			
-			//´´½¨SkyboxµÄ²ÉÑùÆ÷//¶ÀÁ¢²ÉÑùÆ÷
-			stSamplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;//ÈýºÏÒ»ÏßÐÔ¹ýÂË
+			//ï¿½ï¿½ï¿½ï¿½Skyboxï¿½Ä²ï¿½ï¿½ï¿½ï¿½ï¿½//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+			stSamplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;//ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½Ô¹ï¿½ï¿½ï¿½
 
 			stSamplerDesc.MinLOD = 0;
 			stSamplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
 			stSamplerDesc.MipLODBias = 0.0f;
 			stSamplerDesc.MaxAnisotropy = 1;
-			stSamplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;//¸÷ÏòÒìÐÔ¸ãÃ»ÁË
+			stSamplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¸ï¿½Ã»ï¿½ï¿½
 			stSamplerDesc.BorderColor[0] = 0.0f;
 			stSamplerDesc.BorderColor[1] = 0.0f;
 			stSamplerDesc.BorderColor[2] = 0.0f;
 			stSamplerDesc.BorderColor[3] = 0.0f;
 			stSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 			stSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-			stSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;//WRAP (°ü¹ü)
+			stSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;//WRAP (ï¿½ï¿½ï¿½ï¿½)
 
 			pID3D12Device4->CreateSampler(&stSamplerDesc, pISampleHpSkybox->GetCPUDescriptorHandleForHeapStart());
 			//---------------------------------------------------------------------------------------------
 
 		}
 
-		// ÓÃÀ¦°ó°ü¼ÇÂ¼¹Ì»¯µÄÃüÁî
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ï¿½Ì»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		{
-			//ÇòÌåµÄÀ¦°ó°ü
+			//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			pIBundlesEarth->SetGraphicsRootSignature(pIRootSignature.Get());
 			pIBundlesEarth->SetPipelineState(pIPSOEarth.Get());
 
 			ID3D12DescriptorHeap* ppHeapsEarth[] = { pISRVHpEarth.Get(),pISampleHpEarth.Get() };
 			pIBundlesEarth->SetDescriptorHeaps(_countof(ppHeapsEarth), ppHeapsEarth);
-			//ÉèÖÃSRV
+			//ï¿½ï¿½ï¿½ï¿½SRV
 			pIBundlesEarth->SetGraphicsRootDescriptorTable(0, pISRVHpEarth->GetGPUDescriptorHandleForHeapStart());
 
 			D3D12_GPU_DESCRIPTOR_HANDLE stGPUCBVHandleEarth = pISRVHpEarth->GetGPUDescriptorHandleForHeapStart();
 			stGPUCBVHandleEarth.ptr += nSRVDescriptorSize;
 
-			//ÉèÖÃCBV
+			//ï¿½ï¿½ï¿½ï¿½CBV
 			pIBundlesEarth->SetGraphicsRootDescriptorTable(1, stGPUCBVHandleEarth);
 
 			D3D12_GPU_DESCRIPTOR_HANDLE hGPUSamplerEarth = pISampleHpEarth->GetGPUDescriptorHandleForHeapStart();
 			hGPUSamplerEarth.ptr += (g_nCurrentSamplerNO * nSamplerDescriptorSize);
 
-			//ÉèÖÃSample
+			//ï¿½ï¿½ï¿½ï¿½Sample
 			pIBundlesEarth->SetGraphicsRootDescriptorTable(2, hGPUSamplerEarth);
-			//×¢ÒâÎÒÃÇÊ¹ÓÃµÄäÖÈ¾ÊÖ·¨ÊÇÈý½ÇÐÎÁÐ±í£¬Ò²¾ÍÊÇÍ¨³£µÄMeshÍø¸ñ
+			//×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½Ãµï¿½ï¿½ï¿½È¾ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½Ò²ï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ï¿½ï¿½Meshï¿½ï¿½ï¿½ï¿½
 			pIBundlesEarth->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			pIBundlesEarth->IASetVertexBuffers(0, 1, &stVBVEarth);
 			pIBundlesEarth->IASetIndexBuffer(&stIBVEarth);
 
-			//Draw Call£¡£¡£¡
+			//Draw Callï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			pIBundlesEarth->DrawIndexedInstanced(nSphereIndexCnt, 1, 0, 0, 0);
 			pIBundlesEarth->Close();
 
 
 
-			//SkyboxµÄÀ¦°ó°ü
+			//Skyboxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			pIBundlesSkybox->SetPipelineState(pIPSOSkyBox.Get());
 			pIBundlesSkybox->SetGraphicsRootSignature(pIRootSignature.Get());
 			ID3D12DescriptorHeap* ppHeaps[] = { pISRVHpSkybox.Get(),pISampleHpSkybox.Get() };
 			pIBundlesSkybox->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
-			//ÉèÖÃSRV
+			//ï¿½ï¿½ï¿½ï¿½SRV
 			pIBundlesSkybox->SetGraphicsRootDescriptorTable(0, pISRVHpSkybox->GetGPUDescriptorHandleForHeapStart());
 
 			D3D12_GPU_DESCRIPTOR_HANDLE stGPUCBVHandleSkybox = pISRVHpSkybox->GetGPUDescriptorHandleForHeapStart();
 			stGPUCBVHandleSkybox.ptr += nSRVDescriptorSize;
-			//ÉèÖÃCBV
+			//ï¿½ï¿½ï¿½ï¿½CBV
 			pIBundlesSkybox->SetGraphicsRootDescriptorTable(1, stGPUCBVHandleSkybox);
 			pIBundlesSkybox->SetGraphicsRootDescriptorTable(2, pISampleHpSkybox->GetGPUDescriptorHandleForHeapStart());
 			pIBundlesSkybox->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 			pIBundlesSkybox->IASetVertexBuffers(0, 1, &stVBVSkybox);
 
-			//Draw Call£¡£¡£¡
+			//Draw Callï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 			pIBundlesSkybox->DrawInstanced(4, 1, 0, 0);
 			pIBundlesSkybox->Close();
 		}
@@ -1875,11 +1907,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			stEndResBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 		}
 		
-		// äÖÈ¾Ïà¹Ø¿ªÊ¼
-		// ¼ÇÂ¼Ö¡¿ªÊ¼Ê±¼ä£¬ºÍµ±Ç°Ê±¼ä£¬ÒÔÑ­»·½áÊøÎª½ç
+		// ï¿½ï¿½È¾ï¿½ï¿½Ø¿ï¿½Ê¼
+		// ï¿½ï¿½Â¼Ö¡ï¿½ï¿½Ê¼Ê±ï¿½ä£¬ï¿½Íµï¿½Ç°Ê±ï¿½ä£¬ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½
 		ULONGLONG n64tmFrameStart = ::GetTickCount64();
 		ULONGLONG n64tmCurrent = n64tmFrameStart;
-		//¼ÆËãÐý×ª½Ç¶ÈÐèÒªµÄ±äÁ¿
+		//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½Ç¶ï¿½ï¿½ï¿½Òªï¿½Ä±ï¿½ï¿½ï¿½
 		double dModelRotationYAngle = 0.0f;
 
 		DWORD dwRet = 0;
@@ -1888,34 +1920,34 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 		ShowWindow(hWnd, nCmdShow);
 		UpdateWindow(hWnd);
 		while (!bExit)
-		{//×¢ÒâÕâÀïÎÒÃÇµ÷ÕûÁËÏûÏ¢Ñ­»·£¬½«µÈ´ýÊ±¼äÉèÖÃÎª0£¬Í¬Ê±½«¶¨Ê±ÐÔµÄäÖÈ¾£¬¸Ä³ÉÁËÃ¿´ÎÑ­»·¶¼äÖÈ¾
-		 //µ«Õâ²»±íÊ¾ËµMsgWaitº¯Êý¾ÍÃ»É¶ÓÃÁË£¬¼á³ÖÊ¹ÓÃËüÊÇÒòÎªºóÃæÀý×ÓÈç¹ûÏë¼ÓÈë¶àÏß³Ì¿ØÖÆ¾Í·Ç³£¼òµ¥ÁË
+		{//×¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Çµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È´ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª0ï¿½ï¿½Í¬Ê±ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Ôµï¿½ï¿½ï¿½È¾ï¿½ï¿½ï¿½Ä³ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¾
+		 //ï¿½ï¿½ï¿½â²»ï¿½ï¿½Ê¾ËµMsgWaitï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»É¶ï¿½ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß³Ì¿ï¿½ï¿½Æ¾Í·Ç³ï¿½ï¿½ï¿½ï¿½ï¿½
 			dwRet = ::MsgWaitForMultipleObjects(1, &hEventFence, FALSE, INFINITE, QS_ALLINPUT);
 			switch (dwRet - WAIT_OBJECT_0)
 			{
 			case 0:
 			{
 				//OnUpdate()
-				{// ×¼±¸Ò»¸ö¼òµ¥µÄÐý×ªMVP¾ØÕó ÈÃ·½¿é×ªÆðÀ´
+				{// ×¼ï¿½ï¿½Ò»ï¿½ï¿½ï¿½òµ¥µï¿½ï¿½ï¿½×ªMVPï¿½ï¿½ï¿½ï¿½ ï¿½Ã·ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½ï¿½
 					n64tmCurrent = ::GetTickCount();
-					//¼ÆËãÐý×ªµÄ½Ç¶È£ºÐý×ª½Ç¶È(»¡¶È) = Ê±¼ä(Ãë) * ½ÇËÙ¶È(»¡¶È/Ãë)
-					dModelRotationYAngle += ((n64tmCurrent - n64tmFrameStart) / 1000.0f) * g_fPalstance;//µ¥Î»ÊÇºÁÃë£¬×ÜÖ®ºã¶¨Ò»Ãë×ªËÙ¡£g_fPalstance½ÇËÙ¶È(»¡¶È/Ãë)
+					//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½Ä½Ç¶È£ï¿½ï¿½ï¿½×ªï¿½Ç¶ï¿½(ï¿½ï¿½ï¿½ï¿½) = Ê±ï¿½ï¿½(ï¿½ï¿½) * ï¿½ï¿½ï¿½Ù¶ï¿½(ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½)
+					dModelRotationYAngle += ((n64tmCurrent - n64tmFrameStart) / 1000.0f) * g_fPalstance;//ï¿½ï¿½Î»ï¿½Çºï¿½ï¿½ë£¬ï¿½ï¿½Ö®ï¿½ã¶¨Ò»ï¿½ï¿½×ªï¿½Ù¡ï¿½g_fPalstanceï¿½ï¿½ï¿½Ù¶ï¿½(ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½)
 
 					n64tmFrameStart = n64tmCurrent;
 
-					//Ðý×ª½Ç¶ÈÊÇ2PIÖÜÆÚµÄ±¶Êý£¬È¥µôÖÜÆÚÊý£¬Ö»ÁôÏÂÏà¶Ô0»¡¶È¿ªÊ¼µÄÐ¡ÓÚ2PIµÄ»¡¶È¼´¿É
+					//ï¿½ï¿½×ªï¿½Ç¶ï¿½ï¿½ï¿½2PIï¿½ï¿½ï¿½ÚµÄ±ï¿½ï¿½ï¿½ï¿½ï¿½È¥ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½0ï¿½ï¿½ï¿½È¿ï¿½Ê¼ï¿½ï¿½Ð¡ï¿½ï¿½2PIï¿½Ä»ï¿½ï¿½È¼ï¿½ï¿½ï¿½
 					if (dModelRotationYAngle > XM_2PI)
 					{
-						dModelRotationYAngle = fmod(dModelRotationYAngle, XM_2PI);//È¡Óà£¬²»ÒªÈÃ½Ç¶È¶ÑÌ«¶àµ¼ÖÂ¾«¶ÈÆ«²î
+						dModelRotationYAngle = fmod(dModelRotationYAngle, XM_2PI);//È¡ï¿½à£¬ï¿½ï¿½Òªï¿½Ã½Ç¶È¶ï¿½Ì«ï¿½àµ¼ï¿½Â¾ï¿½ï¿½ï¿½Æ«ï¿½ï¿½
 					}
 
-					// 1. ÉãÏñ»ú·ÉÐÐ¿ØÖÆ (WASD + QE)
+					// 1. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¿ï¿½ï¿½ï¿½ (WASD + QE)
 					
-					// A. ¼ÆËãµ±Ç°µÄÊÓÏß·½Ïò (Forward) ºÍ ÓÒ·½Ïò (Right)
+					// A. ï¿½ï¿½ï¿½ãµ±Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½ï¿½ï¿½ (Forward) ï¿½ï¿½ ï¿½Ò·ï¿½ï¿½ï¿½ (Right)
 					// ---------------------------------------------------
-					// ÕâÀïµÄÊýÑ§Ô­Àí£º
-					// Forward = (sinY*cosP, sinP, cosY*cosP) -> Çò×ø±ê×ªµÑ¿¨¶û
-					// Right   = (cosY, 0, -sinY)             -> Óë Forward ´¹Ö±µÄË®Æ½ÏòÁ¿
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ§Ô­ï¿½ï¿½ï¿½ï¿½
+					// Forward = (sinY*cosP, sinP, cosY*cosP) -> ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½Ñ¿ï¿½ï¿½ï¿½
+					// Right   = (cosY, 0, -sinY)             -> ï¿½ï¿½ Forward ï¿½ï¿½Ö±ï¿½ï¿½Ë®Æ½ï¿½ï¿½ï¿½ï¿½
 					float r = cosf(g_fPitch);
 					XMFLOAT3 f3Forward;
 					f3Forward.x = r * sinf(g_fYaw);
@@ -1927,124 +1959,124 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 					f3Right.y = 0.0f;
 					f3Right.z = -sinf(g_fYaw);
 
-					// ½« Float3 ×ªÎª Vector ÒÔ±ã¼ÆËã
+					// ï¿½ï¿½ Float3 ×ªÎª Vector ï¿½Ô±ï¿½ï¿½ï¿½ï¿½
 					XMVECTOR vForward = XMLoadFloat3(&f3Forward);
 					XMVECTOR vRight = XMLoadFloat3(&f3Right);
 					XMVECTOR vUpWorld = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 					XMVECTOR vEye = XMLoadFloat3(&g_f3EyePos);
 
-					// B. ¼ì²â¼üÅÌÊäÈë (Òì²½²ÉÑù£¬Ë¿»¬Á÷³©)
-					float moveSpeed = 0.1f; // ·ÉÐÐËÙ¶È
+					// B. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ì²½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¿ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+					float moveSpeed = 0.1f; // ï¿½ï¿½ï¿½ï¿½ï¿½Ù¶ï¿½
 
-					// °´×¡ Shift ¼ÓËÙ
+					// ï¿½ï¿½×¡ Shift ï¿½ï¿½ï¿½ï¿½
 					if (GetAsyncKeyState(VK_SHIFT) & 0x8000) moveSpeed *= 3.0f;
 
-					// W / S : Ç°ºó·ÉÐÐ (ÑØÊÓÏß·½Ïò)
+					// W / S : Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ß·ï¿½ï¿½ï¿½)
 					if (GetAsyncKeyState('W') & 0x8000) vEye += vForward * moveSpeed;
 					if (GetAsyncKeyState('S') & 0x8000) vEye -= vForward * moveSpeed;
 
-					// A / D : ×óÓÒÆ½ÒÆ (ÑØÓÒÏòÁ¿·½Ïò)
+					// A / D : ï¿½ï¿½ï¿½ï¿½Æ½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
 					if (GetAsyncKeyState('D') & 0x8000) vEye += vRight * moveSpeed;
 					if (GetAsyncKeyState('A') & 0x8000) vEye -= vRight * moveSpeed;
 
-					// Q / E : ´¹Ö±Éý½µ (ÑØÊÀ½ç Y Öá)
-					if (GetAsyncKeyState('Q') & 0x8000) vEye += vUpWorld * moveSpeed; // Éý
-					if (GetAsyncKeyState('E') & 0x8000) vEye -= vUpWorld * moveSpeed; // ½µ
+					// Q / E : ï¿½ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Y ï¿½ï¿½)
+					if (GetAsyncKeyState('Q') & 0x8000) vEye += vUpWorld * moveSpeed; // ï¿½ï¿½
+					if (GetAsyncKeyState('E') & 0x8000) vEye -= vUpWorld * moveSpeed; // ï¿½ï¿½
 
-					// C. ¸üÐÂÉãÏñ»úÎ»ÖÃ
+					// C. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½
 					XMStoreFloat3(&g_f3EyePos, vEye);
 
-					// 2. ÇòÌå¿ØÖÆ (·½Ïò¼ü)
-					// ÕâÑùÄã¿ÉÒÔÒ»±ß·É£¬Ò»±ßÎ¢µ÷ÇòµÄÎ»ÖÃ
+					// 2. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½)
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ß·É£ï¿½Ò»ï¿½ï¿½Î¢ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½
 					float sphereSpeed = 0.05f;
 					if (GetAsyncKeyState(VK_UP) & 0x8000) g_SpherePos.z += sphereSpeed;
 					if (GetAsyncKeyState(VK_DOWN) & 0x8000) g_SpherePos.z -= sphereSpeed;
 					if (GetAsyncKeyState(VK_LEFT) & 0x8000) g_SpherePos.x -= sphereSpeed;
 					if (GetAsyncKeyState(VK_RIGHT) & 0x8000) g_SpherePos.x += sphereSpeed;
 
-					// 3. ¹¹½¨ View ¾ØÕó
-					// Ä¿±êµã = ÑÛ¾¦ + ÊÓÏß·½Ïò
+					// 3. ï¿½ï¿½ï¿½ï¿½ View ï¿½ï¿½ï¿½ï¿½
+					// Ä¿ï¿½ï¿½ï¿½ = ï¿½Û¾ï¿½ + ï¿½ï¿½ï¿½ß·ï¿½ï¿½ï¿½
 					XMVECTOR vFocus = vEye + vForward;
 					XMMATRIX xmView = XMMatrixLookAtLH(vEye, vFocus, vUpWorld);
 
-					//Í¶Ó°£¬¸ù¾ÝÊÓ³¡¼ÆËã
-					XMMATRIX xmProj = XMMatrixPerspectiveFovLH(XM_PIDIV4//ËÄ·ÖÖ®ÅÉ
-						, (FLOAT)iWndWidth / (FLOAT)iWndHeight, 1.0f, 2000.0f);//¿í¸ß±È£¬
+					//Í¶Ó°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó³ï¿½ï¿½ï¿½ï¿½ï¿½
+					XMMATRIX xmProj = XMMatrixPerspectiveFovLH(XM_PIDIV4//ï¿½Ä·ï¿½Ö®ï¿½ï¿½
+						, (FLOAT)iWndWidth / (FLOAT)iWndHeight, 1.0f, 2000.0f);//ï¿½ï¿½ï¿½ß±È£ï¿½
 					
-					// ±äÁ¿Ãû²»ºÃ£¬ÕâÀïÊÇskyboxµÄview¿½±´earthµÄ
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½skyboxï¿½ï¿½viewï¿½ï¿½ï¿½ï¿½earthï¿½ï¿½
 					XMMATRIX xmSkyBox = xmView;
 					
 					
-					xmSkyBox = XMMatrixMultiply(xmSkyBox, xmProj);//£¨xmView£¬xmProj£©
-					// »ñÈ¡Äæ¾ØÕó
-					xmSkyBox = XMMatrixInverse(nullptr, xmSkyBox);//ÉñÆæ£¬VºÍPµÄÄæ¾ØÕó£¬¼ÓÉÏM²»¶¯£¬¾ÍÊÇMVPµÄÄæ¾ØÕó
+					xmSkyBox = XMMatrixMultiply(xmSkyBox, xmProj);//ï¿½ï¿½xmViewï¿½ï¿½xmProjï¿½ï¿½
+					// ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½
+					xmSkyBox = XMMatrixInverse(nullptr, xmSkyBox);//ï¿½ï¿½ï¿½æ£¬Vï¿½ï¿½Pï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ó£¬¼ï¿½ï¿½ï¿½Mï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½MVPï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-					//ÉèÖÃSkyboxµÄMVP
-					XMStoreFloat4x4(&pMVPBufSkybox->m_MVP, xmSkyBox);//ÎÒ¾ÍËµ£¬ÕâÀïÊÇ°ÑxmSkyBox´æÔçÖ¸ÕëpMVPBufSkyboxµÄÈÝÆ÷Àï¡£Õâ¸¨Öúº¯Êý¸úDXµÄÏ°¹ßÓÖµ¹¹ýÀ´ÁË¡£ÕâÀï»¹´Ó¼ÆËã¹æ¸ñ×ªÎª´æ´¢¹æ¸ñ
+					//ï¿½ï¿½ï¿½ï¿½Skyboxï¿½ï¿½MVP
+					XMStoreFloat4x4(&pMVPBufSkybox->m_MVP, xmSkyBox);//ï¿½Ò¾ï¿½Ëµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½xmSkyBoxï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½pMVPBufSkyboxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¡£ï¿½â¸¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½DXï¿½ï¿½Ï°ï¿½ï¿½ï¿½Öµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë¡ï¿½ï¿½ï¿½ï¿½ï»¹ï¿½Ó¼ï¿½ï¿½ï¿½ï¿½ï¿½×ªÎªï¿½æ´¢ï¿½ï¿½ï¿½
 
-					pMVPBufSkybox->m_v4EyePos = XMFLOAT4(g_f3EyePos.x, g_f3EyePos.y, g_f3EyePos.z, 1.0f);//³öÏÖµÚ¶þ´Î£¬Éè¶¨viewµÄÊ±ºòÓÃÁËÕâ¸ö£¬»ñµÃÑÛ¾¦Î»ÖÃ
+					pMVPBufSkybox->m_v4EyePos = XMFLOAT4(g_f3EyePos.x, g_f3EyePos.y, g_f3EyePos.z, 1.0f);//ï¿½ï¿½ï¿½ÖµÚ¶ï¿½ï¿½Î£ï¿½ï¿½è¶¨viewï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Û¾ï¿½Î»ï¿½ï¿½
 
-					// ´«ÈëÎ»ÖÃµ÷ÓÃÈýÏßÐÔ²îÖµ
+					// ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ãµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô²ï¿½Öµ
 					SH9 finalSH = InterpolateProbeVolume(g_SpherePos);
 
-					// ÌîÈë³£Á¿»º³åÇø¡£´ò¿ªµÄmap£¬ÕâÀï²Å½øÐÐÐ´Èë£¬Ò²¾ÍÊÇCBVÖ¸¶¨µÄÄÇ¿éUploadÒ»Ö±ÔÚÕâµÈ×ÅÐ´ÄØ
+					// ï¿½ï¿½ï¿½ë³£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ò¿ªµï¿½mapï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å½ï¿½ï¿½ï¿½Ð´ï¿½ë£¬Ò²ï¿½ï¿½ï¿½ï¿½CBVÖ¸ï¿½ï¿½ï¿½ï¿½ï¿½Ç¿ï¿½UploadÒ»Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½
 					for (int i = 0; i < 9; i++) {
 						pMVPBufEarth->m_SHCoeffs[i] = XMFLOAT4(
 							finalSH.coeffs[i].x, finalSH.coeffs[i].y, finalSH.coeffs[i].z, 1.0f);
 					}
 
-					// A. ×¼±¸±ä»»¾ØÕó
-					// Ëõ·Å
+					// A. ×¼ï¿½ï¿½ï¿½ä»»ï¿½ï¿½ï¿½ï¿½
+					// ï¿½ï¿½ï¿½ï¿½
 					XMMATRIX xmScale = XMMatrixScaling(fSphereSize, fSphereSize, fSphereSize);
-					// ×Ô×ª (±£ÁôÖ®Ç°µÄÐý×ª¶¯»­)
+					// ï¿½ï¿½×ª (ï¿½ï¿½ï¿½ï¿½Ö®Ç°ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½ï¿½)
 					XMMATRIX xmRot = XMMatrixRotationY(static_cast<float>(dModelRotationYAngle));
-					// Î»ÒÆ (Ê¹ÓÃ WASD ¿ØÖÆµÄ g_SpherePos)
+					// Î»ï¿½ï¿½ (Ê¹ï¿½ï¿½ WASD ï¿½ï¿½ï¿½Æµï¿½ g_SpherePos)
 					XMMATRIX xmTrans = XMMatrixTranslation(g_SpherePos.x, g_SpherePos.y, g_SpherePos.z);
 
-					// B. ×éºÏÊÀ½ç¾ØÕó (World Matrix)
-					// Ë³Ðò£ºËõ·Å -> Ðý×ª -> Æ½ÒÆ
-					// ×¢Òâ£ºXMMatrixMultiply ÊÇ×ó³Ë¹æÔò£¬»òÕßÊÇÐÐÖ÷ÐòµÄÀÛ³Ë£¬Âß¼­ÉÏÊÇ Scale * Rot * Trans
+					// B. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (World Matrix)
+					// Ë³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ -> ï¿½ï¿½×ª -> Æ½ï¿½ï¿½
+					// ×¢ï¿½â£ºXMMatrixMultiply ï¿½ï¿½ï¿½ï¿½Ë¹ï¿½ï¿½ò£¬»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Û³Ë£ï¿½ï¿½ß¼ï¿½ï¿½ï¿½ï¿½ï¿½ Scale * Rot * Trans
 					XMMATRIX xmWorld = XMMatrixMultiply(xmScale, xmRot);
 					xmWorld = XMMatrixMultiply(xmWorld, xmTrans);
 
-					// C. ´æÈë World ¾ØÕó (¸ø Shader Ëã·¨ÏßÓÃ)
+					// C. ï¿½ï¿½ï¿½ï¿½ World ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ Shader ï¿½ã·¨ï¿½ï¿½ï¿½ï¿½)
 					XMStoreFloat4x4(&pMVPBufEarth->m_mWorld, xmWorld);
 
-					// D. ¼ÆËã View * Projection
+					// D. ï¿½ï¿½ï¿½ï¿½ View * Projection
 					XMMATRIX xmVP = XMMatrixMultiply(xmView, xmProj);
 
-					// E. ¼ÆËã×îÖÕ MVP (World * View * Projection)
+					// E. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ MVP (World * View * Projection)
 					XMMATRIX xmFinalMVP = XMMatrixMultiply(xmWorld, xmVP);
 
-					// F. ´æÈë MVP ³£Á¿»º³å
+					// F. ï¿½ï¿½ï¿½ï¿½ MVP ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 					XMStoreFloat4x4(&pMVPBufEarth->m_MVP, xmFinalMVP);
 
 				}
 
-				// ¡¾ÐÞ¸´¡¿Ô­×÷ÕßÃ»ÓÃÉÏµÄ5¸ösamplers¡£¼ì²â²ÉÑùÆ÷ÊÇ·ñÇÐ»»£¬Èç¹ûÇÐ»»ÁË£¬±ØÐëÖØÂ¼ Bundle
+				// ï¿½ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½Ô­ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½Ïµï¿½5ï¿½ï¿½samplersï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½Ð»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð»ï¿½ï¿½Ë£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ Bundle
 				UINT nLastSamplerNO = 0;
 				if (nLastSamplerNO != g_nCurrentSamplerNO)
 				{
-					// ÖØÖÃÃüÁî·ÖÅäÆ÷¡¢ÖØÖÃÃüÁîÁÐ±í
+					// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½
 					GRS_THROW_IF_FAILED(pICmdAllocEarth->Reset());
 					GRS_THROW_IF_FAILED(pIBundlesEarth->Reset(pICmdAllocEarth.Get(), pIPSOEarth.Get()));
 
-					// ¿ªÊ¼ÖØÂ¼
+					// ï¿½ï¿½Ê¼ï¿½ï¿½Â¼
 					pIBundlesEarth->SetGraphicsRootSignature(pIRootSignature.Get());
 					pIBundlesEarth->SetPipelineState(pIPSOEarth.Get());
 
 					ID3D12DescriptorHeap* ppHeapsEarth[] = { pISRVHpEarth.Get(), pISampleHpEarth.Get() };
 					pIBundlesEarth->SetDescriptorHeaps(_countof(ppHeapsEarth), ppHeapsEarth);
 
-					// ÉèÖÃ SRV
+					// ï¿½ï¿½ï¿½ï¿½ SRV
 					pIBundlesEarth->SetGraphicsRootDescriptorTable(0, pISRVHpEarth->GetGPUDescriptorHandleForHeapStart());
 
-					// ÉèÖÃ CBV
+					// ï¿½ï¿½ï¿½ï¿½ CBV
 					D3D12_GPU_DESCRIPTOR_HANDLE stGPUCBVHandleEarth = pISRVHpEarth->GetGPUDescriptorHandleForHeapStart();
 					stGPUCBVHandleEarth.ptr += nSRVDescriptorSize;
 					pIBundlesEarth->SetGraphicsRootDescriptorTable(1, stGPUCBVHandleEarth);
 
-					// ¡¾¹Ø¼üµã¡¿ÕâÀï»áÊ¹ÓÃÐÂµÄ g_nCurrentSamplerNO ¼ÆËãÐÂµÄµØÖ·
+					// ï¿½ï¿½ï¿½Ø¼ï¿½ï¿½ã¡¿ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½ï¿½Âµï¿½ g_nCurrentSamplerNO ï¿½ï¿½ï¿½ï¿½ï¿½ÂµÄµï¿½Ö·
 					D3D12_GPU_DESCRIPTOR_HANDLE hGPUSamplerEarth = pISampleHpEarth->GetGPUDescriptorHandleForHeapStart();
 					hGPUSamplerEarth.ptr += (g_nCurrentSamplerNO * nSamplerDescriptorSize);
 					pIBundlesEarth->SetGraphicsRootDescriptorTable(2, hGPUSamplerEarth);
@@ -2055,65 +2087,65 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 
 					pIBundlesEarth->DrawIndexedInstanced(nSphereIndexCnt, 1, 0, 0, 0);
 
-					// 5. ·â°ü
+					// 5. ï¿½ï¿½ï¿½
 					pIBundlesEarth->Close();
 
-					// 6. ¸üÐÂ×´Ì¬£¬·ÀÖ¹ÏÂÒ»Ö¡ÖØ¸´ÖØÂ¼
+					// 6. ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½Ò»Ö¡ï¿½Ø¸ï¿½ï¿½ï¿½Â¼
 					nLastSamplerNO = g_nCurrentSamplerNO;
 				}
 
-				//»ñÈ¡ÐÂµÄºó»º³åÐòºÅ£¬ÒòÎªPresentÕæÕýÍê³ÉÊ±ºó»º³åµÄÐòºÅ¾Í¸üÐÂÁË
+				//ï¿½ï¿½È¡ï¿½ÂµÄºó»º³ï¿½ï¿½ï¿½Å£ï¿½ï¿½ï¿½ÎªPresentï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ó»º³ï¿½ï¿½ï¿½ï¿½Å¾Í¸ï¿½ï¿½ï¿½ï¿½ï¿½
 				nCurrentFrameIndex = pISwapChain3->GetCurrentBackBufferIndex();
-				//ÃüÁî·ÖÅäÆ÷ÏÈResetÒ»ÏÂ
+				//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ResetÒ»ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pICmdAllocDirect->Reset());
-				//ResetÃüÁîÁÐ±í£¬²¢ÖØÐÂÖ¸¶¨ÃüÁî·ÖÅäÆ÷ºÍPSO¶ÔÏó
+				//Resetï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½PSOï¿½ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pICmdListDirect->Reset(pICmdAllocDirect.Get(), pIPSOEarth.Get()));
 
-				// Í¨¹ý×ÊÔ´ÆÁÕÏÅÐ¶¨ºó»º³åÒÑ¾­ÇÐ»»Íê±Ï¿ÉÒÔ¿ªÊ¼äÖÈ¾ÁË
+				// Í¨ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ï¿½ó»º³ï¿½ï¿½Ñ¾ï¿½ï¿½Ð»ï¿½ï¿½ï¿½Ï¿ï¿½ï¿½Ô¿ï¿½Ê¼ï¿½ï¿½È¾ï¿½ï¿½
 				stBeginResBarrier.Transition.pResource = pIARenderTargets[nCurrentFrameIndex].Get();
 				pICmdListDirect->ResourceBarrier(1, &stBeginResBarrier);
 
-				//Æ«ÒÆÃèÊö·ûÖ¸Õëµ½Ö¸¶¨Ö¡»º³åÊÓÍ¼Î»ÖÃ
+				//Æ«ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ëµ½Ö¸ï¿½ï¿½Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¼Î»ï¿½ï¿½
 				D3D12_CPU_DESCRIPTOR_HANDLE stRTVHandle = pIRTVHeap->GetCPUDescriptorHandleForHeapStart();
 				stRTVHandle.ptr += (nCurrentFrameIndex * nRTVDescriptorSize);
 				D3D12_CPU_DESCRIPTOR_HANDLE stDSVHandle = pIDSVHeap->GetCPUDescriptorHandleForHeapStart();
-				//ÉèÖÃäÖÈ¾Ä¿±ê
+				//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¾Ä¿ï¿½ï¿½
 				pICmdListDirect->OMSetRenderTargets(1, &stRTVHandle, FALSE, &stDSVHandle);
 				pICmdListDirect->RSSetViewports(1, &stViewPort);
 				pICmdListDirect->RSSetScissorRects(1, &stScissorRect);
 
-				// ¼ÌÐø¼ÇÂ¼ÃüÁî£¬²¢ÕæÕý¿ªÊ¼ÐÂÒ»Ö¡µÄäÖÈ¾
+				// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½î£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¼ï¿½ï¿½Ò»Ö¡ï¿½ï¿½ï¿½ï¿½È¾
 				pICmdListDirect->ClearRenderTargetView(stRTVHandle, faClearColor, 0, nullptr);
 				pICmdListDirect->ClearDepthStencilView(pIDSVHeap->GetCPUDescriptorHandleForHeapStart()
 					, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-				//31¡¢Ö´ÐÐSkyboxµÄÀ¦°ó°ü
+				//31ï¿½ï¿½Ö´ï¿½ï¿½Skyboxï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 				ID3D12DescriptorHeap* ppHeapsSkybox[] = { pISRVHpSkybox.Get(),pISampleHpSkybox.Get() };
 				pICmdListDirect->SetDescriptorHeaps(_countof(ppHeapsSkybox), ppHeapsSkybox);
-				pICmdListDirect->ExecuteBundle(pIBundlesSkybox.Get());//Êµ¼ÊÕâÀï°ÑPSO¸øÔØÈë½øÈ¥ÁË¡£¾ÍÊÇ¶ÔÓ¦µÄPSO
+				pICmdListDirect->ExecuteBundle(pIBundlesSkybox.Get());//Êµï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½PSOï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¥ï¿½Ë¡ï¿½ï¿½ï¿½ï¿½Ç¶ï¿½Ó¦ï¿½ï¿½PSO
 
-				//32¡¢Ö´ÐÐÇòÌåµÄÀ¦°ó°ü
+				//32ï¿½ï¿½Ö´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 				ID3D12DescriptorHeap* ppHeapsEarth[] = { pISRVHpEarth.Get(),pISampleHpEarth.Get() };
 				pICmdListDirect->SetDescriptorHeaps(_countof(ppHeapsEarth), ppHeapsEarth);
 				pICmdListDirect->ExecuteBundle(pIBundlesEarth.Get());
 				
 
-				//ÓÖÒ»¸ö×ÊÔ´ÆÁÕÏ£¬ÓÃÓÚÈ·¶¨äÖÈ¾ÒÑ¾­½áÊø¿ÉÒÔÌá½»»­ÃæÈ¥ÏÔÊ¾ÁË
+				//ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ô´ï¿½ï¿½ï¿½Ï£ï¿½ï¿½ï¿½ï¿½ï¿½È·ï¿½ï¿½ï¿½ï¿½È¾ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½á½»ï¿½ï¿½ï¿½ï¿½È¥ï¿½ï¿½Ê¾ï¿½ï¿½
 				stEndResBarrier.Transition.pResource = pIARenderTargets[nCurrentFrameIndex].Get();
 				pICmdListDirect->ResourceBarrier(1, &stEndResBarrier);
-				//¹Ø±ÕÃüÁîÁÐ±í£¬¿ÉÒÔÈ¥Ö´ÐÐÁË
+				//ï¿½Ø±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¥Ö´ï¿½ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pICmdListDirect->Close());
 
-				//Ö´ÐÐÃüÁîÁÐ±í
+				//Ö´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð±ï¿½
 				ID3D12CommandList* ppCommandLists[] = { pICmdListDirect.Get() };
 				pICMDQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
 
 
-				//Ìá½»»­Ãæ
+				//ï¿½á½»ï¿½ï¿½ï¿½ï¿½
 				GRS_THROW_IF_FAILED(pISwapChain3->Present(1, 0));
 
 
-				//¿ªÊ¼Í¬²½GPUÓëCPUµÄÖ´ÐÐ£¬ÏÈ¼ÇÂ¼Î§À¸±ê¼ÇÖµ
+				//ï¿½ï¿½Ê¼Í¬ï¿½ï¿½GPUï¿½ï¿½CPUï¿½ï¿½Ö´ï¿½Ð£ï¿½ï¿½È¼ï¿½Â¼Î§ï¿½ï¿½ï¿½ï¿½ï¿½Öµ
 				const UINT64 fence = n64FenceValue;
 				GRS_THROW_IF_FAILED(pICMDQueue->Signal(pIFence.Get(), fence));
 				n64FenceValue++;
@@ -2121,7 +2153,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 			}
 			break;
 			case 1:
-			{//´¦ÀíÏûÏ¢
+			{//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢
 				while (::PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
 				{
 					if (WM_QUIT != msg.message)
@@ -2149,7 +2181,7 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR    l
 		//::CoUninitialize();
 	}
 	catch (CGRSCOMException & e)
-	{//·¢ÉúÁËCOMÒì³£
+	{//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½COMï¿½ì³£
 		e;
 	}
 	return 0;
@@ -2163,21 +2195,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		PostQuitMessage(0);
 		break;
 
-		// ¼à²âÊó±êÓÒ¼ü°´ÏÂ
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò¼ï¿½ï¿½ï¿½ï¿½ï¿½
 	case WM_RBUTTONDOWN:
 	{
 		g_bRightMouseDown = true;
-		// ¼ÇÂ¼°´ÏÂÊ±µÄ×ø±ê
+		// ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		g_LastMousePos.x = LOWORD(lParam);
 		g_LastMousePos.y = HIWORD(lParam);
-		// ²¶»ñÊó±ê£¬·ÀÖ¹ÍÏ³ö´°¿ÚÍâÊ§Ð§
+		// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê£¬ï¿½ï¿½Ö¹ï¿½Ï³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê§Ð§
 		SetCapture(hWnd);
-		// Òþ²Ø¹â±ê
+		// ï¿½ï¿½ï¿½Ø¹ï¿½ï¿½
 		ShowCursor(FALSE);
 	}
 	break;
 
-	// Êó±êÓÒ¼üÌ§Æð
+	// ï¿½ï¿½ï¿½ï¿½Ò¼ï¿½Ì§ï¿½ï¿½
 	case WM_RBUTTONUP:
 	{
 		g_bRightMouseDown = false;
@@ -2186,34 +2218,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}
 	break;
 
-	// Êó±êÒÆ¶¯£º¼ÆËãÐý×ª½Ç¶È (Yaw/Pitch)
+	// ï¿½ï¿½ï¿½ï¿½Æ¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½Ç¶ï¿½ (Yaw/Pitch)
 	case WM_MOUSEMOVE:
 	{
 		if (g_bRightMouseDown)
 		{
-			// »ñÈ¡µ±Ç°Êó±êÎ»ÖÃ
+			// ï¿½ï¿½È¡ï¿½ï¿½Ç°ï¿½ï¿½ï¿½Î»ï¿½ï¿½
 			int xPos = (short)LOWORD(lParam);
 			int yPos = (short)HIWORD(lParam);
 
-			// ¼ÆËãÎ»ÒÆÁ¿ (Delta)
+			// ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ (Delta)
 			int dx = xPos - g_LastMousePos.x;
 			int dy = yPos - g_LastMousePos.y;
 
-			// ÁéÃô¶È (Sensitivity)
+			// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (Sensitivity)
 			float fSens = 0.005f;
 
-			// ¸üÐÂ½Ç¶È
-			// ×¢Òâ£ºdx ¶ÔÓ¦ Yaw (×óÓÒ×ª)£¬dy ¶ÔÓ¦ Pitch (ÉÏÏÂ¿´)
+			// ï¿½ï¿½ï¿½Â½Ç¶ï¿½
+			// ×¢ï¿½â£ºdx ï¿½ï¿½Ó¦ Yaw (ï¿½ï¿½ï¿½ï¿½×ª)ï¿½ï¿½dy ï¿½ï¿½Ó¦ Pitch (ï¿½ï¿½ï¿½Â¿ï¿½)
 			g_fYaw += dx * fSens;
 
-			// ¡¾ÐÞ¸ÄÕâÀï¡¿: °Ñ += ¸ÄÎª -= 
-			// ÒòÎªÆÁÄ»×ø±ê Y ÏòÉÏÊÇ¼õÐ¡£¬¶øÎÒÃÇÐèÒª Pitch ÏòÉÏÊÇÔö¼Ó(Ì§Í·)
+			// ï¿½ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½ï¿½ï¡¿: ï¿½ï¿½ += ï¿½ï¿½Îª -= 
+			// ï¿½ï¿½Îªï¿½ï¿½Ä»ï¿½ï¿½ï¿½ï¿½ Y ï¿½ï¿½ï¿½ï¿½ï¿½Ç¼ï¿½Ð¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Òª Pitch ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½(Ì§Í·)
 			g_fPitch -= dy * fSens;
 
-			// ÏÞÖÆ Pitch ½Ç¶È£¬·ÀÖ¹·­¸úÍ· (ËøËÀÔÚ +/- 85¶È)
+			// ï¿½ï¿½ï¿½ï¿½ Pitch ï¿½Ç¶È£ï¿½ï¿½ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½Í· (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ +/- 85ï¿½ï¿½)
 			g_fPitch = max(-XM_PIDIV2 + 0.1f, min(XM_PIDIV2 - 0.1f, g_fPitch));
 
-			// ¸üÐÂ¡°ÉÏÒ»Ö¡Î»ÖÃ¡±
+			// ï¿½ï¿½ï¿½Â¡ï¿½ï¿½ï¿½Ò»Ö¡Î»ï¿½Ã¡ï¿½
 			g_LastMousePos.x = xPos;
 			g_LastMousePos.y = yPos;
 		}
@@ -2224,7 +2256,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		USHORT n16KeyCode = (wParam & 0xFF);
 
-		// ¿Õ¸ñ¼üÇÐ»»²ÉÑùÆ÷
+		// ï¿½Õ¸ï¿½ï¿½ï¿½Ð»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 		if (VK_SPACE == n16KeyCode)
 		{
 			++g_nCurrentSamplerNO;
@@ -2234,7 +2266,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			SetWindowText(hWnd, szTitle);
 		}
 
-		// ¸´Î»¹¦ÄÜ (TAB)
+		// ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ (TAB)
 		if (VK_TAB == n16KeyCode)
 		{
 			g_SpherePos = XMFLOAT3(0.0f, 0.0f, 0.0f);
@@ -2243,8 +2275,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			g_fYaw = 0.0f;
 			g_fPitch = 0.0f;
 		}
-		// ×¢Òâ£ºWASD ºÍ ·½Ïò¼üµÄÂß¼­ÎÒÃÇÒÆµ½ OnUpdate ÀïÈ¥´¦ÀíÁË
-		// ÒòÎª WndProc ´¦Àí°´¼ü»áÓÐÑÓ³ÙºÍ¿¨¶Ù£¬²»ÊÊºÏË¿»¬·ÉÐÐ¡£
+		// ×¢ï¿½â£ºWASD ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµï¿½ OnUpdate ï¿½ï¿½È¥ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+		// ï¿½ï¿½Îª WndProc ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó³ÙºÍ¿ï¿½ï¿½Ù£ï¿½ï¿½ï¿½ï¿½Êºï¿½Ë¿ï¿½ï¿½ï¿½ï¿½ï¿½Ð¡ï¿½
 	}
 	break;
 
